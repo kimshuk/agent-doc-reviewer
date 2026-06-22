@@ -1,7 +1,7 @@
 # Design Spec: `review-doc` — cross-model document reviewer
 
 **Date:** 2026-06-22
-**Status:** Draft v8 — final (scope frozen; final review addressed)
+**Status:** v8 — APPROVED (frozen v1; no required findings remain). Implementation plan: `docs/superpowers/plans/2026-06-22-review-doc.md`.
 
 ## Purpose
 
