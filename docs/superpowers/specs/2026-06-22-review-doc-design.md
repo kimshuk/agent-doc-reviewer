@@ -1,7 +1,7 @@
 # Design Spec: `review-doc` — cross-model document reviewer
 
 **Date:** 2026-06-22
-**Status:** Draft v7 — final candidate (scope frozen; one final review pending)
+**Status:** Draft v8 — final (scope frozen; final review addressed)
 
 ## Purpose
 
@@ -35,7 +35,7 @@ limitation, not claimed.
 | Package layout | **Single npm package**, `src/core` + `src/cli` |
 | `--criteria` file format | **Markdown prose, injected verbatim**, plus `[CRIT-*]` list-item ids (§4) |
 | `--prior` (spec) format | Markdown; for `stage:plan`, `[REQ-*]` ids + a recompute-verified approval artifact (§6) |
-| Round persistence | **Per-lineage immutable `round-N.json` + mutable `round-N.responses.json` sidecar** (§6) |
+| Round persistence | **Per-lineage immutable `round-N.json` + finalize-once `round-N.responses.json` sidecar** (§6) |
 | JSON output forcing | **Schema-strict + one repair retry + fail**, uniform across adapters |
 
 ## Review responses
@@ -64,6 +64,13 @@ findings link active replacements; `feasibilityFindingIds` 3-way rule.
 | --- | --- | --- |
 | P1.1 immutable artifact vs author-response storage conflict | split immutable `round-N.json` from mutable `round-N.responses.json` sidecar; verdict is independent of responses | §2, §6 |
 | P1.2 over-broad verification scope + lineage ambiguity | reframed to the v1 threat model; recompute/lineage are corruption/staleness guards (not tamper-proof); `--prior-log` selects the lineage | §6 |
+
+**Round 7 (v7→v8), final:**
+
+| Item | Resolution | Section |
+| --- | --- | --- |
+| P1 response sidecar not pinned to its child round | `review-doc respond` validates + **atomically finalizes** the sidecar (write-once); child records `parent_responses_sha256`; next run verifies both parent hashes | §2, §3, §6 |
+| P2 "self-contained semantic checks" scope vague | enumerate the within-result checks done at approval-verify; cross-round lifecycle + location checks are **not** re-verified (→ v2) | §6 |
 
 ---
 
@@ -137,7 +144,7 @@ interface ReviewResult {
   findings: Finding[];
 }
 
-// Author responses — a SEPARATE, mutable artifact; does NOT influence the verdict.
+// Author responses — a SEPARATE, finalize-once sidecar; does NOT influence the verdict.
 type AuthorResponseKind =
   "accepted_and_revised" | "rejected_with_evidence" | "already_addressed" | "needs_user_decision";
 interface AuthorResponse { findingId: string; response: AuthorResponseKind; evidence?: string; }
@@ -151,7 +158,7 @@ interface ReviewRequest {
 
 **Verdict is a pure function of the review result** (`computeVerdict(result, criteriaMeta,
 requirementIds)`) — it never reads author responses. This is what lets the review artifact
-be immutable and the responses live in a separate, mutable sidecar (§6).
+be immutable and the responses live in a separate, finalize-once sidecar (§6).
 
 **Two-stage validation.** (1) *Structural* — ajv against the constant schema. (2)
 *Semantic* (`semantics.ts`). **Either** failing triggers the single repair retry (carrying
@@ -164,8 +171,10 @@ throws (exit 2). Lineage/approval/identity checks run **before** any network cal
 2. `identity` guard: identical author/reviewer provider+model -> error unless `--allow-same-model`.
 3. `lineage` selects the lineage from `--prior-log` (or `--new-lineage` / bootstrap),
    validates it is the latest round with stage/criteria/prior continuity, and loads the
-   sibling response sidecar (validating completeness). For `stage:plan`, `approval`
-   recompute-verifies the upstream spec approval artifact against `--prior` (§6).
+   sibling **finalized** response sidecar — verifying its `round_sha256` and re-validating
+   completeness; the new round records both `parent_round_sha256` and
+   `parent_responses_sha256`. For `stage:plan`, `approval` recompute-verifies the upstream
+   spec approval artifact against `--prior` (§6).
 4. Core loads doc/criteria/prior/prior-log; `criteria.ts` extracts `[CRIT-*]` (+ optional)
    and (plan) `[REQ-*]`; `hash` computes the sha256s.
 5. `render` -> line-numbered text for doc (and prior).
@@ -175,7 +184,8 @@ throws (exit 2). Lineage/approval/identity checks run **before** any network cal
 8. `runReview`: `adapter.review(req)` -> ajv -> semantic -> [repair] -> `ReviewResult`.
 9. `computeVerdict(result, criteriaMeta, requirementIds)` -> verdict.
 10. `persistence` **write-once** the immutable `<lineage>/round-N.json`. (The author
-    responses for round N are written later by the skill to `round-N.responses.json`.)
+    responses for round N are finalized separately via `review-doc respond` into
+    `round-N.responses.json`.)
 11. Return `{ verdict, result }`. CLI prints JSON, exits per §3.
 
 ---
@@ -201,7 +211,17 @@ review-doc <doc.md> --stage <spec|plan> --criteria <path> [options]
 
   --compare <list>     "anthropic:<model>,openai:<model>" -> run each, log side by side
   --out <dir>          review dir             (default: <doc>.review/ next to the doc)
+
+review-doc respond --round <lineage/round-N.json> --responses <file|-> [--out <dir>]
+  Validate author responses against round N's active findings and ATOMICALLY FINALIZE
+  the write-once <lineage>/round-N.responses.json sidecar. Re-finalizing -> collision error.
 ```
+
+**`respond` subcommand (P1).** The skill records author responses through `respond`, not by
+hand-editing files. It reads responses (a JSON array of `{ findingId, response, evidence? }`),
+validates them against round N's `result` (completeness, evidence, no dup/unknown — §6),
+writes the sidecar via temp-file + atomic rename, and marks it finalized (write-once). Exit
+`0` on success, `2` on validation failure or a re-finalize collision.
 
 **Cross-model guard.** Reviewer provider **and** model equal to the declared author's ->
 error before any network call unless `--allow-same-model`. Both identities persisted.
@@ -417,7 +437,7 @@ Per-lineage layout next to the doc (default `<doc>.review/`, overridable with `-
 ```
 <doc>.review/
   <lineageId>/round-1.json            # immutable review artifact (write-once)
-  <lineageId>/round-1.responses.json  # mutable author responses (sidecar)
+  <lineageId>/round-1.responses.json  # author responses (finalize-once sidecar)
   <lineageId>/round-2.json
   <lineageId>/round-2.responses.json
   <lineageId>/round-2.compare.json    # compare mode (diagnostic)
@@ -426,18 +446,25 @@ Per-lineage layout next to the doc (default `<doc>.review/`, overridable with `-
 
 `lineageId` is a sortable timestamp-based id minted when a lineage starts.
 
-### Immutable review artifact vs mutable responses (P1.1)
+### Immutable review artifact + finalized responses (P1.1, P1-round7)
 
 - **`round-N.json` is written exactly once** by `review-doc` and never modified. It holds
   identities, hashes, `criteriaMeta`/`requirementIds`, `verdict`, `result`, and the parent /
   approval references. Because it is immutable, its sha256 is stable — which is what
   `parent_round_sha256` and `prior_approval_sha256` reference. A second write to the same
   path is a collision error (exit 2): no overwrite, no data loss.
-- **`round-N.responses.json` is the mutable sidecar** the skill writes after the review. The
-  **verdict never reads responses** (§2/§4), so storing them outside the immutable artifact
-  removes the earlier write-after-hash contradiction. When a later run passes `--prior-log
-  <lineage>/round-N.json`, core reads the immutable review for prior findings and the sibling
-  sidecar for the author's responses.
+- **`round-N.responses.json` is a finalize-once sidecar.** The **verdict never reads
+  responses** (§2/§4), so they live outside the immutable artifact — but to keep the record
+  reproducible the sidecar is **not** freely mutable for its whole life. It is **drafted then
+  finalized** by `review-doc respond` (§3): the command validates the responses against round
+  N's `result`, writes the file with a temp-file + **atomic rename**, and marks it finalized.
+  Once finalized it is **write-once** — a re-finalize attempt is a collision error (exit 2).
+- **The child round pins both parents.** When a later run extends the lineage via `--prior-log
+  <lineage>/round-N.json`, it requires the round-N sidecar to be **finalized**, reads prior
+  findings from the immutable review and responses from the sidecar, and records **both**
+  `parent_round_sha256` (the review) **and** `parent_responses_sha256` (the sidecar). The next
+  run re-verifies both hashes — so a sidecar edited after the child was created is detected
+  (hash mismatch -> error), closing the data-loss / irreproducibility gap.
 
 `round-N.json` shape:
 
@@ -449,6 +476,7 @@ Per-lineage layout next to the doc (default `<doc>.review/`, overridable with `-
   "reviewer": { "provider": "openai",    "model": "gpt-..." },
   "document_sha256": "...", "criteria_sha256": "...", "prior_document_sha256": "...",
   "parent_round_sha256": "...",          // sha256 of the prior-log round-N.json; null for round 1
+  "parent_responses_sha256": "...",      // sha256 of the finalized round-N.responses.json; null for round 1
   "prior_approval_sha256": "...",        // sha256 of the verified spec approval artifact; null for spec
   "criteriaMeta": { "CRIT-SCOPE": { "required": true }, "CRIT-STYLE": { "required": false } },
   "requirementIds": ["REQ-AUTH"],        // plan; [] for spec
@@ -463,6 +491,7 @@ Per-lineage layout next to the doc (default `<doc>.review/`, overridable with `-
 ```json
 {
   "round": 2, "lineageId": "...", "round_sha256": "...",   // the round-N.json this responds to
+  "finalized": true,                                        // set by `review-doc respond`; write-once thereafter
   "responses": [
     { "findingId": "F1", "response": "accepted_and_revised" },
     { "findingId": "F2", "response": "rejected_with_evidence", "evidence": "§4 covers this; L120-128" }
@@ -478,17 +507,25 @@ Per-lineage layout next to the doc (default `<doc>.review/`, overridable with `-
   prevents feeding an out-of-date log that would silently drop newer findings.
 - `--new-lineage` mints a fresh lineage (round 1, no parent); never combined with
   `--prior-log`. Bootstrapping with neither flag is allowed only when no rounds exist.
-- `parent_round_sha256` is recorded as a provenance breadcrumb linking to the immediate
-  prior round. **Limitation:** v1 verifies only the *immediate* prior-log (latest-round +
-  continuity); it does **not** recursively re-verify the whole chain. That is sufficient for
-  staleness/corruption detection; deeper provenance is v2 (§9).
+- `parent_round_sha256` and `parent_responses_sha256` are recorded as provenance breadcrumbs
+  linking to the immediate prior round and its finalized sidecar; on the next run both are
+  re-verified against the on-disk files (mismatch -> error). **Limitation:** v1 verifies only
+  the *immediate* prior round + sidecar (latest-round + continuity + the two hashes); it does
+  **not** recursively re-verify the whole chain. That is sufficient for staleness/corruption
+  detection; deeper provenance is v2 (§9).
 
 ### Approval-artifact verification (plan) — corruption / staleness guard, not tamper-proof
 
 Loading the upstream spec approval artifact (`round-N.json`):
 1. validate it against the round schema;
-2. re-run the self-contained semantic checks on its stored `result` using its persisted
-   `criteriaMeta`/`requirementIds`;
+2. re-run only the **within-result** semantic checks — those computable from the artifact +
+   its persisted `criteriaMeta`/`requirementIds` alone (P2): coverage exact-set & linkage;
+   `not_applicable` rules; supersede linkage (references resolve **within** the result);
+   `feasibilityFindingIds` 3-way; finding-id uniqueness. **Explicitly NOT re-checked here**
+   (they need the prior round or the rendered doc, unavailable from the artifact alone):
+   cross-round lifecycle provenance/transitions, carry-forward completeness, and `where`
+   location bounds. Those were enforced when the round was first produced; re-verifying them
+   from an isolated artifact is **v2** (§9).
 3. **recompute** the verdict and require **both** the recomputed verdict **and** the stored
    `verdict` to equal `approved` (mismatch -> error — catches accidental corruption or a
    casually edited verdict);
@@ -496,19 +533,20 @@ Loading the upstream spec approval artifact (`round-N.json`):
 5. record `prior_approval_sha256` in the plan round.
 
 > **Limitation (by design, per the v1 threat model):** these checks catch accidental
-> corruption, stale artifacts, and casual hand-edits. They do **not** establish
-> authenticity — a fully self-consistent *fabricated* artifact is not detected.
-> Cryptographic signing and full provenance are **v2** (§9).
+> corruption, stale artifacts, and casual hand-edits. They do **not** re-establish the
+> cross-round lifecycle history, nor authenticity — a fully self-consistent *fabricated*
+> artifact is not detected. Lifecycle re-verification, cryptographic signing, and full
+> provenance are **v2** (§9).
 
 ### Hash-bound approval & author-response contract
 
 - An `approved` verdict is valid only for that exact `document_sha256` + `criteria_sha256`
   (+ `prior_document_sha256`); a current-hash mismatch is stale and invalid.
-- The response sidecar is validated against its round's `result` (at write time and when
-  consumed as `--prior-log`): `round_sha256` must match the round it answers; **exactly one**
-  response per **active** finding; `resolved`/`superseded` need none; unknown or **duplicate**
-  `findingId` -> error; `evidence` (non-empty) **required** for `rejected_with_evidence` and
-  `already_addressed`.
+- The response sidecar is validated against its round's `result` both at **finalize** time
+  (`review-doc respond`) and when **consumed** as `--prior-log`: `round_sha256` must match the
+  round it answers; the sidecar must be `finalized`; **exactly one** response per **active**
+  finding; `resolved`/`superseded` need none; unknown or **duplicate** `findingId` -> error;
+  `evidence` (non-empty) **required** for `rejected_with_evidence` and `already_addressed`.
 
 ---
 
@@ -518,12 +556,13 @@ A `SKILL.md` driving the loop:
 
 1. Author (the coding agent) writes/edits the doc.
 2. Run `review-doc` -> `{ verdict, result }`, persisted as the immutable `<lineage>/round-N.json`.
-3. For **each active finding**, record exactly one structured author response in
-   `<lineage>/round-N.responses.json` (§6): revise (`accepted_and_revised`), rebut with
-   evidence (`rejected_with_evidence` / `already_addressed`), or escalate
-   (`needs_user_decision`).
+3. For **each active finding**, decide one response — revise (`accepted_and_revised`), rebut
+   with evidence (`rejected_with_evidence` / `already_addressed`), or escalate
+   (`needs_user_decision`) — then **finalize** them via `review-doc respond --round
+   <lineage>/round-N.json --responses <file>` (validates completeness + write-once; §3/§6).
 4. **If any response is `needs_user_decision`, halt and hand to the user before re-running.**
-5. Re-run with `--prior-log <lineage>/round-N.json` (selects the lineage; sidecar read + validated).
+5. Re-run with `--prior-log <lineage>/round-N.json` (selects the lineage; finalized sidecar
+   read + both parent hashes verified).
 6. Stop at `approved` or after `MAX_ROUNDS` (default **3**).
 7. **Hand to the user for sign-off.**
 8. Only after sign-off, advance `spec` -> `plan`: the plan review uses the approved spec as
@@ -560,10 +599,13 @@ Runner: `vitest`. Coverage:
   active finding -> fail; terminal may be omitted; superseded without active replacement ->
   fail; required superseded without active required replacement -> fail.
 - **Feasibility / location:** `feasibilityFindingIds` 3-way + active; bad `where` -> fail.
-- **Immutability & sidecar (P1.1):** `round-N.json` written once; second write -> collision
-  error; round artifact contains **no** responses; `verdict` recomputes identically with
-  responses absent; sidecar round-trips and validates against the round's result; sidecar
-  `round_sha256` mismatch -> error.
+- **Immutability & sidecar (P1.1, round-7 P1):** `round-N.json` written once; second write ->
+  collision error; round artifact contains **no** responses; `verdict` recomputes identically
+  with responses absent; `review-doc respond` validates against the round's result and writes
+  the sidecar atomically with `finalized: true`; re-finalize -> collision error; sidecar
+  `round_sha256` mismatch -> error; a child run records `parent_responses_sha256` and **errors
+  if the finalized sidecar is mutated afterward** (hash mismatch); consuming an un-finalized
+  sidecar -> error.
 - **Lineage (P1.2):** `--prior-log` selects the subdir and writes `round-(N+1)` there; stale
   (not latest) -> error; stage/criteria/prior mismatch -> error; `--new-lineage` + `--prior-log`
   -> error; bootstrap allowed only when empty; cross-lineage no overwrite; `parent_round_sha256`
@@ -599,7 +641,10 @@ Runner: `vitest`. Coverage:
 **v2 integrity hardening backlog (deliberately deferred per the v1 threat model):**
 - Cryptographic **signing** of round artifacts (authenticity vs accidental corruption).
 - **Full recursive provenance** verification of the lineage chain (v1 checks the immediate
-  prior only).
+  prior round + sidecar only).
+- **Cross-round lifecycle re-verification** from an isolated artifact (transitions /
+  carry-forward / location bounds are checked when a round is produced, not re-checked at
+  approval-load time).
 - Detection of **fully self-consistent fabricated** artifacts.
 - An **enforcement hook/wrapper** turning the advisory gate (§7) into a hard gate against the
   current document hash.
