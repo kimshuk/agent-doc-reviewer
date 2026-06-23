@@ -287,9 +287,11 @@ This is a **human-adjudicated** evaluation, separate from unit tests. **Approved
 ### Evaluation artifacts (frozen file formats, for reproducibility)
 
 Store under `eval/phase-1/<run-id>/` (`run-id` = a frozen label chosen before the run, e.g.
-`2026-07-01-r1`). Three JSON files; all are append-only once the run is frozen.
+`2026-07-01-r1`). The run is **one manifest + an outputs directory + an append-only adjudication
+log + a write-once summary**. The persistence discipline is explicit per artifact (no file is
+both an array *and* "append-only"):
 
-- **`run-manifest.json`** — the frozen inputs:
+- **`run-manifest.json`** — **write-once** (frozen before the run), the inputs:
   ```json
   {
     "runId": "2026-07-01-r1",
@@ -304,45 +306,65 @@ Store under `eval/phase-1/<run-id>/` (`run-id` = a frozen label chosen before th
                                      "detectionCriteria": "..." }] }]
   }
   ```
-  The seeded `defects[]` IS the hidden manifest; keep it out of anything fed to the reviewer.
-- **`outputs/<configId>/<specId>.json`** — the **immutable raw reviewer output** (`{verdict,
-  result}`) for each (config, spec) invocation. Written once, never edited. This is the evidence
-  every adjudication row points at, so a `serious_false_positive` count can be re-checked against
-  the actual finding text later.
-- **`adjudication.json`** — one row per emitted finding, each linking to its raw output and
-  carrying the audit fields needed to reproduce the metrics:
+  The seeded `defects[]` IS the hidden manifest; keep it out of anything fed to the reviewer. The
+  **planned invocation set is exactly `reviewerConfigs × (realCohort ∪ seededCohort)`** — every
+  one of those `(configId, specId)` pairs MUST have an output envelope below.
+- **`outputs/<configId>/<specId>.json`** — **write-once** result envelope for **every** planned
+  `(config, spec)` pair, recording success *or* failure so metrics can never be computed on a
+  cherry-picked successful subset:
   ```json
-  [{ "configId": "cfg-a", "specId": "R1", "cohort": "real",
-     "findingId": "F1",
-     "outputPath": "outputs/cfg-a/R1.json", "outputSha256": "...",
-     "claim": "<verbatim finding claim>", "disposition": "required",
-     "label": "false_positive", "seriousFalsePositive": true,
-     "matchedDefectId": null,
-     "adjudicator": "<name/id>", "adjudicatedAt": "2026-07-01T12:00:00Z",
-     "note": "why this label / why serious" }]
+  { "status": "success", "configId": "cfg-a", "specId": "R1",
+    "verdict": "changes_requested", "result": { /* full ReviewResult */ } }
+  ```
+  or
+  ```json
+  { "status": "failure", "configId": "cfg-a", "specId": "R1",
+    "error": "<message / HTTP status>", "failedAt": "2026-07-01T12:00:00Z" }
+  ```
+  Written once per pair, never edited. Adjudication rows point at these by `outputSha256`.
+- **`adjudication.ndjson`** — **append-only, one JSON object per line** (NDJSON, not a JSON array —
+  so a new judgment is a genuine line append, never a file rewrite). One line per emitted finding:
+  ```json
+  { "configId": "cfg-a", "specId": "R1", "cohort": "real", "findingId": "F1",
+    "outputPath": "outputs/cfg-a/R1.json", "outputSha256": "...",
+    "claim": "<verbatim finding claim>", "disposition": "required",
+    "label": "false_positive", "seriousFalsePositive": true, "matchedDefectId": null,
+    "adjudicator": "<name/id>", "adjudicatedAt": "2026-07-01T12:00:00Z",
+    "note": "why this label / why serious" }
   ```
   `cohort` ∈ `real|seeded`; `label` ∈ `valid_actionable|valid_non_actionable|false_positive`;
   `seriousFalsePositive` is `true` only for a **required** `false_positive` meeting the serious
-  bar (false otherwise); `matchedDefectId` links a seeded-cohort finding to a manifest defect
-  (else `null`); `outputPath`+`outputSha256` pin the immutable raw output the finding came from;
-  `adjudicator`/`adjudicatedAt` record who judged it and when.
-- **`metric-summary.json`** — computed, **per reviewer config**:
+  bar; `matchedDefectId` links a seeded-cohort finding to a manifest defect (else `null`);
+  `outputPath`+`outputSha256` pin the immutable output the finding came from.
+- **`metric-summary.json`** — **write-once, generated _after_ adjudication is finalized** (not
+  edited in place), per reviewer config:
   ```json
   [{ "configId": "cfg-a",
+     "plannedSpecs": 8, "outputsPresent": 8, "outputFailures": 0,
      "realRequiredTotal": 12, "realValidActionable": 9, "precision": 0.75,
      "seriousFalsePositives": 0,
      "seededDefectsTotal": 11, "seededDefectsDetected": 10, "detection": 0.909,
      "evidenceSufficient": true, "passed": true }]
   ```
-  `seriousFalsePositives` is the count of `seriousFalsePositive:true` rows for that config (so it
-  is re-derivable from `adjudication.json`). `passed` is computed strictly from the thresholds
-  above; `evidenceSufficient=false` forces `passed=false` ("insufficient evidence").
+  `seriousFalsePositives` is the count of `seriousFalsePositive:true` adjudication lines for that
+  config (re-derivable). `passed` is computed strictly from the thresholds; `evidenceSufficient`
+  and `passed` obey the completeness rule below.
 
-**Evidence sufficiency is per reviewer configuration.** Each config must independently collect
-**≥ 10 required findings on the real cohort** (the dataset-level floors — ≥8 specs, ≥10 seeded
-defects — are shared). A config with fewer than 10 real-cohort required findings is "insufficient
-evidence" and cannot be the one that `passed`. The phase passes when **≥ 1 config is both
-evidence-sufficient and meets all thresholds**.
+**Completeness rule (no success-only selection).** For a reviewer configuration:
+- Every planned `(configId, specId)` in the manifest MUST have an output envelope. A **missing**
+  output ⇒ the run is invalid for that config until produced.
+- If that config has **any** `status:"failure"` output (or any missing one), it is
+  **`evidenceSufficient: false`** and **cannot `pass`** — metrics are **never** computed over only
+  its successful specs.
+- Only a config with **all planned outputs present and `status:"success"`** is eligible to be
+  evidence-sufficient and to `pass`.
+
+**Evidence sufficiency is per reviewer configuration** and requires **both**: (a) the
+completeness rule above (all planned outputs present and `status:"success"`), **and** (b)
+**≥ 10 required findings on the real cohort** collected by that config (the dataset-level floors —
+≥8 specs, ≥10 seeded defects — are shared). Failing either ⇒ `evidenceSufficient:false`, which
+forces `passed:false`. The phase passes when **≥ 1 config is evidence-sufficient AND meets all
+thresholds**.
 
 A new run (any tuning) uses a new `run-id`; prior runs and their `outputs/` are never edited.
 
