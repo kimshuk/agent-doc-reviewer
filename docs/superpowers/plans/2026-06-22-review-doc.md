@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a provider-agnostic cross-model document-review core library plus a thin `review-doc` CLI and a `review-loop` workflow skill, per `docs/superpowers/specs/2026-06-22-review-doc-design.md` (v10).
+**Goal:** Build a provider-agnostic cross-model document-review core library plus a thin `review-doc` CLI and a `review-loop` workflow skill, per `docs/superpowers/specs/2026-06-22-review-doc-design.md` (v11).
 
 **Architecture:** A pure core library (`src/core`) owns all review logic — prompt building, schema/semantic validation, verdict, persistence, lineage, approval, providers — with zero knowledge of `process`/argv/stdout/exit. Adapters call provider HTTP APIs via raw `fetch` and force structured JSON output. A thin CLI (`src/cli`) parses args, calls the core, prints JSON, and sets exit codes. Tests mock every provider (no real network).
 
@@ -310,6 +310,25 @@ describe("validateRoundArtifact", () => {
     const bad = structuredClone(goodRound) as any; bad.result.feasibility = "maybe";
     expect(validateRoundArtifact(bad).ok).toBe(false);
   });
+  it("rejects round > 1 with null parent hashes (continuity cannot be skipped)", () => {
+    const bad = structuredClone(goodRound) as any;
+    bad.round = 2; bad.parent_round_sha256 = null; bad.parent_responses_sha256 = null;
+    expect(validateRoundArtifact(bad).ok).toBe(false);
+  });
+  it("rejects round 1 carrying non-null parent hashes", () => {
+    const bad = structuredClone(goodRound) as any;
+    bad.round = 1; bad.parent_round_sha256 = "b".repeat(64); bad.parent_responses_sha256 = "c".repeat(64);
+    expect(validateRoundArtifact(bad).ok).toBe(false);
+  });
+  it("rejects round 2 with only one parent hash set (must be together)", () => {
+    const bad = structuredClone(goodRound) as any;
+    bad.round = 2; bad.parent_round_sha256 = "b".repeat(64); bad.parent_responses_sha256 = null;
+    expect(validateRoundArtifact(bad).ok).toBe(false);
+  });
+  it("rejects an empty author identity", () => {
+    const bad = structuredClone(goodRound) as any; bad.author = { provider: "", model: "" };
+    expect(validateRoundArtifact(bad).ok).toBe(false);
+  });
 });
 
 describe("validateResponsesArtifact", () => {
@@ -398,7 +417,7 @@ export const REVIEW_SCHEMA = {
 
 const identitySchema = {
   type: "object", additionalProperties: false, required: ["provider", "model"],
-  properties: { provider: { type: "string" }, model: { type: "string" } }
+  properties: { provider: { type: "string", minLength: 1 }, model: { type: "string", minLength: 1 } }
 } as const;
 
 // Non-null sha256 fields must be lowercase 64-hex; a truncated/garbage hash is corruption.
@@ -432,7 +451,15 @@ export const ROUND_ARTIFACT_SCHEMA = {
     requirementIds: { type: "array", items: { type: "string" } },
     verdict: { enum: ["approved", "changes_requested"] },
     result: REVIEW_SCHEMA
-  }
+  },
+  // Parent-hash invariant: round 1 has NO parent (both null); every later round has BOTH
+  // (both non-null). This forbids a round > 1 that nulls its parents to skip continuity checks,
+  // and forbids a round 1 that fabricates a parent. The two hashes are always together.
+  allOf: [{
+    if: { properties: { round: { const: 1 } } },
+    then: { properties: { parent_round_sha256: { type: "null" }, parent_responses_sha256: { type: "null" } } },
+    else: { properties: { parent_round_sha256: sha256Hex, parent_responses_sha256: sha256Hex } }
+  }]
 } as const;
 
 export const RESPONSES_ARTIFACT_SCHEMA = {
@@ -484,7 +511,7 @@ export function validateResponsesArtifact(data: unknown): { ok: true } | { ok: f
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/core/schema.test.ts`
-Expected: PASS (12 tests).
+Expected: PASS (16 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1900,7 +1927,10 @@ const artifact = (round: number): RoundArtifact => ({
   schemaVersion: 1, round, lineageId: "L1", timestamp: "T", stage: "spec",
   author: { provider: "anthropic", model: "a" }, reviewer: { provider: "openai", model: "o" },
   document_sha256: "d".repeat(64), criteria_sha256: "c".repeat(64), prior_document_sha256: null,
-  parent_round_sha256: null, parent_responses_sha256: null, prior_approval_sha256: null,
+  // honor the parent-hash invariant (round 1 ⇒ null; round > 1 ⇒ non-null) so the fixture is a valid envelope
+  parent_round_sha256: round === 1 ? null : "e".repeat(64),
+  parent_responses_sha256: round === 1 ? null : "f".repeat(64),
+  prior_approval_sha256: null,
   criteriaMeta: { "CRIT-A": { required: true } }, requirementIds: [],
   verdict: "approved",
   result: { feasibility: "feasible", feasibilityRationale: "", feasibilityFindingIds: [],
@@ -2273,7 +2303,8 @@ describe("selectLineage", () => {
   it("rejects a stale --prior-log that is not the latest round", async () => {
     const r1 = writeRoundOnce(dir, "L1", 1, art({ round: 1 }));
     await finalizeResponses(r1, [{ findingId: "F1", response: "accepted_and_revised" }]);
-    const r2 = writeRoundOnce(dir, "L1", 2, art({ round: 2 }));
+    // round 2 must carry both parent hashes (envelope invariant) to be a valid round to write
+    const r2 = writeRoundOnce(dir, "L1", 2, art({ round: 2, parent_round_sha256: "e".repeat(64), parent_responses_sha256: "f".repeat(64) }));
     await finalizeResponses(r2, [{ findingId: "F1", response: "accepted_and_revised" }]);
     await expect(selectLineage({ ...common, reviewDir: dir, newLineage: false, priorLogPath: r1 }))
       .rejects.toThrow(UsageError);
@@ -3082,6 +3113,12 @@ describe("cli respond", () => {
     const sidecar = JSON.parse(await readFile(roundPath.replace(/\.json$/, ".responses.json"), "utf8"));
     expect(sidecar.finalized).toBe(true);
   });
+  it("rejects --responses - (stdin not supported in v1)", async () => {
+    const o = io();
+    const code = await main(["respond", "--round", join(dir, "x", "round-1.json"), "--responses", "-"], {}, o, deps(approved));
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/stdin|file path/i);
+  });
 });
 ```
 
@@ -3132,6 +3169,10 @@ export async function main(
     if (positionals[0] === "respond") {
       const roundPath = req(values.round, "--round");
       const respFile = req(values.responses, "--responses");
+      // v1 contract: --responses is a FILE only (no stdin). The sidecar is fixed beside its
+      // round, so --out does not apply here (it is ignored if present).
+      if (respFile === "-")
+        throw new UsageError("reading --responses from stdin (-) is not supported in v1; pass a file path");
       const responses = JSON.parse(await readFile(respFile, "utf8")) as AuthorResponse[];
       const sidecar = await finalizeResponses(roundPath, responses);
       io.stdout(JSON.stringify({ finalized: sidecar }) + "\n");
@@ -3237,7 +3278,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/cli/cli.test.ts`
-Expected: PASS (10 tests).
+Expected: PASS (11 tests).
 
 - [ ] **Step 5: Build to confirm the binary compiles**
 
@@ -3384,4 +3425,4 @@ git commit -m "feat: review-loop workflow skill + example criteria"
 
 **Integrity-fix coverage (v9):** envelope validation on read (Tasks 2/14/15); sidecar re-bind on consume (Task 16); deterministic, ambiguity-failing approval selection (Task 17); author identity required + per-`--compare`-target cross-model guard + compare runs the full review contract (Task 20); `[REQ-*]` manifest authored before approval + requirement→task table (spec §7 + this plan's coverage table).
 
-**Integrity-fix coverage (v10, second pass):** author provider+model **always** required — `--allow-same-model` waives only the equality check (Task 20); compare is a **stateless fresh-only** diagnostic — `--prior-log` + `--compare` is an error, nothing is persisted, stdout carries `{ entries, failures }`, with a plan-stage compare integration test (Tasks 18/20); core temp-file naming uses `crypto.randomUUID`, **not** `process.pid`, keeping core free of `process` (REQ-CORE, Task 15); the selected round's **immediate parent pair** is re-verified against on-disk `round-(N-1)` files (Task 16); non-null sha256 envelope fields are format-checked `^[0-9a-f]{64}$` (Task 2). These bring the plan in line with spec §6/§7 (which already mandated the checks) and close the implementation-soundness findings.
+**Integrity-fix coverage (v10, second pass):** author provider+model **always** required — `--allow-same-model` waives only the equality check (Task 20); compare is a **stateless fresh-only** diagnostic — `--prior-log` + `--compare` is an error, nothing is persisted, stdout carries `{ entries, failures }`, with a plan-stage compare integration test (Tasks 18/20); core temp-file naming uses `crypto.randomUUID`, **not** `process.pid`, keeping core free of `process` (REQ-CORE, Task 15); the selected round's **immediate parent pair** is re-verified against on-disk `round-(N-1)` files (Task 16); non-null sha256 envelope fields are format-checked `^[0-9a-f]{64}$` (Task 2). **Integrity-fix coverage (v11, third pass):** `respond` is `--responses <file>` only — stdin (`-`) rejected with a clear error, `--out` does not apply (sidecar fixed beside its round), CLI/test/skill aligned (Task 20); round-envelope **parent-hash invariant** via schema `if/then/else` (round 1 ⇒ both parent hashes null; round > 1 ⇒ both non-null; never one alone) so a later round cannot null its parents to skip continuity (Task 2); **non-empty identity** (`provider`/`model` `minLength: 1`) so empty identities are rejected (Task 2). These bring the plan in line with spec §6/§7 (which already mandated the checks) and close the implementation-soundness findings.

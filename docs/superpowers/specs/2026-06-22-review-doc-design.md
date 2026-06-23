@@ -1,7 +1,7 @@
 # Design Spec: `review-doc` — cross-model document reviewer
 
 **Date:** 2026-06-22
-**Status:** v10 — frozen v1 scope; second soundness pass: author identity always required (override waives equality only), compare mode is a stateless fresh-only diagnostic that persists nothing, immediate parent-pair hashes re-verified on `--prior-log`, sha256 fields format-checked. Implementation plan: `docs/superpowers/plans/2026-06-22-review-doc.md`.
+**Status:** v11 — frozen v1 scope; third soundness pass: `respond` is `--responses <file>` only (no `--out`, no stdin in v1); round-envelope parent-hash invariant (round 1 ⇒ both null, round > 1 ⇒ both non-null) and non-empty identity enforced in schema. Prior passes: author identity always required, stateless fresh-only compare, immediate parent-pair re-verification, sha256 format-checks. Implementation plan: `docs/superpowers/plans/2026-06-22-review-doc.md`.
 
 ## Purpose
 
@@ -212,17 +212,19 @@ review-doc <doc.md> --stage <spec|plan> --criteria <path> [options]
   --compare <list>     "anthropic:<model>,openai:<model>" -> run each, log side by side
   --out <dir>          review dir             (default: <doc>.review/ next to the doc)
 
-review-doc respond --round <lineage/round-N.json> --responses <file|-> [--out <dir>]
+review-doc respond --round <lineage/round-N.json> --responses <file>
   Validate author responses against round N's active findings and FINALIZE (no-clobber)
   the write-once <lineage>/round-N.responses.json sidecar. Re-finalizing -> collision error.
 ```
 
 **`respond` subcommand (P1).** The skill records author responses through `respond`, not by
-hand-editing files. It reads responses (a JSON array of `{ findingId, response, evidence? }`),
-validates them against round N's `result` (completeness, evidence, no dup/unknown — §6),
-publishes the sidecar via temp-file + **atomic no-clobber create** (`linkSync`, fails
-`EEXIST`), and marks it finalized (write-once). Exit `0` on success, `2` on validation failure
-or a re-finalize collision.
+hand-editing files. It reads responses from a **file** (`--responses <file>`: a JSON array of
+`{ findingId, response, evidence? }`), validates them against round N's `result` (completeness,
+evidence, no dup/unknown — §6), publishes the sidecar via temp-file + **atomic no-clobber
+create** (`linkSync`, fails `EEXIST`), and marks it finalized (write-once). The sidecar path is
+fixed beside its round (`<lineage>/round-N.responses.json`), so `respond` takes **no `--out`**.
+Reading responses from **stdin (`-`)** is **not** in v1 (deferred). Exit `0` on success, `2` on
+validation failure or a re-finalize collision.
 
 **Cross-model guard.** Author provider+model are **always required** — independent of
 `--allow-same-model` — so the recorded identities are never empty and the guard cannot be
@@ -655,7 +657,9 @@ Runner: `vitest`. Coverage:
 - **Feasibility / location:** `feasibilityFindingIds` 3-way + active; bad `where` -> fail.
 - **Envelope validation:** `readRound` / `readResponses` reject malformed or non-JSON
   artifacts (bad `verdict` enum, missing hash field, malformed nested `result`, `finalized !=
-  true`) — a stale/corrupt envelope is never blindly cast.
+  true`) — a stale/corrupt envelope is never blindly cast. Also enforced: **parent-hash
+  invariant** (round 1 -> both parent hashes null; round > 1 -> both non-null; never one
+  without the other) and **non-empty identity** (`provider`/`model` `minLength: 1`).
 - **Immutability & sidecar (P1.1, round-7 P1):** `round-N.json` written once; second write ->
   collision error; round artifact contains **no** responses; `verdict` recomputes identically
   with responses absent; `review-doc respond` validates against the round's result and
