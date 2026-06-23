@@ -32,8 +32,11 @@ findings + responses and verifies continuity. The approval state becomes reprodu
   sidecar re-bind, **immediate parent-pair** re-verification against on-disk `round-(N-1)` files,
   `--new-lineage`, bootstrap.
 - A **new** `reviewDocument` export that **calls** Phase-1's frozen `reviewOnce` and layers the
-  persisting path on top (writes the immutable `round-N.json`, returns `roundPath`). `reviewOnce`
-  is not modified.
+  persisting path on top (writes the immutable `round-N.json`, returns `roundPath`). It resolves
+  priors from the lineage and passes them through the **already-defined** `ReviewOnceInput` fields
+  (`priorFindings`, `priorResponses`) — **no change to `reviewOnce`'s signature**. `reviewOnce` is
+  not modified; `validateSemantic` (same signature) is what gains the lifecycle behavior when
+  `priorFindings` is non-empty.
 - CLI remainder: `respond` (`--responses <file>`, rejects `--out` and stdin `-`), `--prior-log`,
   `--new-lineage`, `--out`.
 

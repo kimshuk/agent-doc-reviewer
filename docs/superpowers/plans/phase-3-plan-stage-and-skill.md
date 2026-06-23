@@ -58,8 +58,8 @@ the reverse cross-model direction (non-Claude author → Claude reviewer) become
 ## Interface handed downstream
 
 This phase closes v1; the downstream "interface" is the **full approved product**: every
-`[REQ-*]` `complete` in `phase-requirement-matrix.md`, all 21 tasks implemented, the
-`review-loop` skill installable. v2 items remain in the approved spec §9 backlog.
+`[REQ-*]` row **Verified** (`✅`, evidence-backed) in `phase-requirement-matrix.md`, all 21 tasks
+implemented, the `review-loop` skill installable. v2 items remain in the approved spec §9 backlog.
 
 ## Test procedure (automated, no network)
 
@@ -82,8 +82,8 @@ This phase closes v1; the downstream "interface" is the **full approved product*
 
 ## Completion conditions
 
-- Full suite + build green; all 21 tasks implemented; `phase-requirement-matrix.md` shows every
-  `[REQ-*]` `complete`.
+- Full suite + build green; all 21 tasks implemented; in `phase-requirement-matrix.md` every
+  `[REQ-*]` row's **Verified** cell is `✅ verified` with an evidence link (not merely Target).
 - End-to-end spec→approve→plan-review→skill loop works on real documents.
 
 ## Abort / experiment-failure decision

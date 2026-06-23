@@ -22,7 +22,7 @@ build the durable-artifact and approval machinery on top of it.
 |-------|-----|-------|-----------------|
 | 1 | `phase-1-review-quality-validation.md` | Stateless spec review + **empirical quality validation** | All Phase-1 tests + build green **and** the approved empirical threshold met by ≥1 reviewer config |
 | 2 | `phase-2-iteration-and-artifacts.md` | Immutable rounds, finalized responses, lineage continuity (spec stage) | All Phase-2 tests + build green; end-to-end spec review→respond→re-run→approved lineage works |
-| 3 | `phase-3-plan-stage-and-skill.md` | Plan-stage upstream review + approval gating + Anthropic adapter + `review-loop` skill | Full v1 per approved spec; all 21 tasks complete; REQ matrix all `complete` |
+| 3 | `phase-3-plan-stage-and-skill.md` | Plan-stage upstream review + approval gating + Anthropic adapter + `review-loop` skill | Full v1 per approved spec; all 21 tasks complete; **every REQ-matrix _Verified_ cell is `✅ verified` with evidence** |
 
 Each phase produces working, testable software on its own.
 
@@ -42,8 +42,9 @@ changing its signature. "Compatible extension via new wrappers," never "edit in 
 ## Companion documents
 
 - `phase-requirement-matrix.md` — every approved `[REQ-*]` × phase, marked
-  `partial`/`complete`/`deferred`, with a **Final cumulative status** column. This is the
-  authoritative coverage map.
+  `partial`/`complete`/`deferred`, with a **Target** column (planned) and a separate
+  **Verified** column (evidence-backed, `⬜ pending` until tests/eval pass). This is the
+  authoritative coverage map; the Phase-3 gate keys on **Verified**, not Target.
 - `spec-amendment-reviewer-base-url.md` — the **minimal proposed amendment** adding the
   `--reviewer-base-url` CLI option (Disposition A). The approved spec is **not** edited until
   that amendment is approved and folded into **spec v12**, which is a precondition for Phase 1.

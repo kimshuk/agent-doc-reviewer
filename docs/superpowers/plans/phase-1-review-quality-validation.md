@@ -38,15 +38,27 @@ exists. `--compare` runs several reviewer **models** side by side **against a si
   3. `feasibilityFindingIds` **3-way** consistency,
   4. **location bounds** (`where.startLine`/`endLine` within the rendered doc).
 - **Stateless invariant (closes an approval leak — see below).** Because lifecycle validation is
-  deferred to Phase 2 but the schema still *allows* `resolved`/`superseded`, enforce: **when there
-  are no prior findings (`priorFindings` empty — always true in Phase 1), every finding must have
-  `status: "new"` and `supersededByFindingIds: []`**. A violation is a **semantic validation
-  failure** (triggers the one repair retry, then exit 2). This guarantees no non-`new`
-  (already-"resolved") required finding can silently slip through `computeVerdict`'s
-  active-finding test. Gating on *empty `priorFindings`* (rather than a Phase-1-only flag) makes
-  it a **sound universal rule**: it also holds for Phase 2 round-1 / `--new-lineage` reviews, and
-  is inert once a prior round legitimately produces non-`new` statuses. It is **not** one of the
-  four lifecycle checks deferred by Disposition C.
+  deferred to Phase 2 but the schema still *allows* `resolved`/`superseded`, enforce — **only when
+  `ctx.mode === "full"` AND `ctx.priorFindings.length === 0`** — that **every finding has
+  `status: "new"` and `supersededByFindingIds: []`**:
+
+  ```ts
+  if (ctx.mode === "full" && ctx.priorFindings.length === 0) {
+    // every finding: status === "new" && supersededByFindingIds.length === 0, else fail
+  }
+  ```
+
+  A violation is a **semantic validation failure** (one repair retry, then exit 2). This stops a
+  non-`new` (already-"resolved") required finding from silently slipping through
+  `computeVerdict`'s active-finding test in a fresh review.
+  - **The `mode === "full"` guard is essential.** Phase 3's approval-artifact re-verification
+    deliberately calls `validateSemantic` with `mode: "within_result", priorFindings: []` on an
+    *already-produced* later-round artifact that may legitimately contain `resolved` findings. The
+    invariant must **not** fire there. So it is keyed on `full` mode (a fresh review) **and** empty
+    priors — not on empty priors alone.
+  - This is a **sound universal rule** (holds for Phase 2 round-1 / `--new-lineage` fresh reviews
+    too) and is inert once a prior round produces non-`new` statuses. It is **not** one of the
+    four lifecycle checks deferred by Disposition C.
 - Pure `computeVerdict` (spec-stage path: `approved` iff feasibility ≠ `not_feasible` and no
   active required finding and no `not_met` required criterion; `upstreamCoverage` empty).
 - Constant prompt builders; line-numbered rendering; `[CRIT-*]` parsing.
@@ -89,7 +101,7 @@ lives in the 21-task plan; do not re-author it — apply the cut.
 | 11 OpenAI adapter | full | Already supports `baseURL`; wire the CLI flag through. Strict `json_schema`, `temperature: 0`, repair-once carries prior invalid output + errors. |
 | 13 runReview | full | repair-once is schema/semantic only; an HTTP error from an unsupported `response_format` is a normal provider error (exit 2), **not** a repair trigger. |
 | 18 Compare mode | full | Stateless, `{entries, failures}` to stdout (already so). Primary harness for the eval. |
-| 19 Core orchestrator | **partial (stateless)** | Ship as a **distinct export `reviewOnce({...}) → {verdict, result}`**: the read→parse→prompt→`runReview`→verdict pipeline. **Omit** `selectLineage`, `writeRoundOnce`, `verifyApproval`, responses wiring. Do **not** name it `reviewDocument` — Phase 2's persisting `reviewDocument` *wraps* `reviewOnce`, so the Phase-1 contract is never mutated. Barrel exports only what Phase 1 ships. |
+| 19 Core orchestrator | **partial (stateless)** | Ship as a **distinct export `reviewOnce(input: ReviewOnceInput) → {verdict, result}`** (input type **frozen** — see "Frozen `reviewOnce` contract"): the read→parse→prompt→`runReview`→verdict pipeline. **Omit** `selectLineage`, `writeRoundOnce`, `verifyApproval`, responses wiring. Do **not** name it `reviewDocument` — Phase 2's persisting `reviewDocument` *wraps* `reviewOnce`, so the Phase-1 contract is never mutated. Barrel exports only what Phase 1 ships. |
 | 20 CLI | **partial** | Subcommands: `review` (stateless) + `compare`. Flags: positional `<doc>`, `--stage spec`, `--criteria`, `--reviewer-provider`/`--reviewer-model`/**`--reviewer-base-url`**, `--author-provider`/`--author-model`, `--allow-same-model`, `--compare`. **No** `respond`, `--prior`, `--prior-approval`, `--prior-log`, `--new-lineage`, `--out`. Exit 0 approved / 1 changes / 2 error; compare 0/2. |
 
 Author identity remains **always required** (exit 2 if missing, even with `--allow-same-model`),
@@ -107,6 +119,43 @@ per the approved CLI contract.
 - The empirical pass threshold and dataset (below) are **approved before** the first scored run
   (`needs_user_decision`).
 
+## Frozen `reviewOnce` contract (defined in Phase 1, never edited)
+
+`reviewOnce`'s **input type is fixed in Phase 1 with all later-phase extension points present**,
+so Phase 2 and Phase 3 fill fields without changing the signature (no in-place edit, no logic
+duplication):
+
+```ts
+export interface ReviewOnceInput {
+  docPath: string;
+  stage: Stage;                                   // Phase 1 uses "spec" only
+  criteriaPath: string;
+  reviewer: { provider: ReviewerProvider; model: string };
+  reviewerIdentity: Identity;
+  author: Identity;
+  allowSameModel: boolean;
+  prior?: {                                       // plan-stage upstream; undefined in Phase 1
+    path: string;
+    rendered: string;                             // line-numbered prior spec
+    requirementIds: string[];                     // [REQ-*]
+  };
+  priorFindings: Finding[];                        // carried active findings; [] in Phase 1
+  priorResponses: AuthorResponse[];                // author responses to priors; [] in Phase 1
+}
+
+export function reviewOnce(input: ReviewOnceInput): Promise<{ verdict: Verdict; result: ReviewResult }>;
+```
+
+- **Phase 1** calls it with `stage:"spec"`, `prior: undefined`, `priorFindings: []`,
+  `priorResponses: []`. With empty priors + `full` mode, the stateless invariant applies.
+- **Phase 2** supplies `priorFindings`/`priorResponses` (resolved from the lineage by the new
+  `reviewDocument` wrapper); `validateSemantic` then runs the lifecycle checks. Same signature.
+- **Phase 3** supplies `prior` (plan-stage `[REQ-*]` + rendered spec) and uses `stage:"plan"`.
+  Same signature.
+- `reviewOnce` is **stateless**: it never reads/writes the review dir. Resolving priors from disk
+  (lineage) and persistence are the *caller's* job (`reviewDocument`, Phase 2). This is what keeps
+  the persistence concern out of the frozen contract.
+
 ## Interface handed to Phase 2
 
 Phase 2 builds on these Phase-1 exports (stable contracts):
@@ -114,11 +163,11 @@ Phase 2 builds on these Phase-1 exports (stable contracts):
 - `ReviewResult`, `Finding`, `Verdict`, `Severity`, `Stage`, `Identity`, `CriteriaMeta` (types).
 - `REVIEW_SCHEMA`, `validateStructural`.
 - `validateSemantic(result, ctx)` + `SemanticContext` — Phase 1 ships it running checks #1–#4
-  **plus** the empty-`priorFindings` invariant; Phase 2 extends the **same** function/signature
-  with provenance/carry-forward/transition/supersede checks (gated by `mode`/`priorFindings`,
-  exactly as the 21-task plan's Task 8 design). The invariant keys off **empty `priorFindings`**,
-  so Phase 2's multi-round path (non-empty priors, which legitimately produces non-`new` statuses)
-  is unaffected.
+  **plus** the `full`-mode + empty-`priorFindings` invariant; Phase 2 extends the **same**
+  function/signature with provenance/carry-forward/transition/supersede checks (gated by
+  `mode`/`priorFindings`, exactly as the 21-task plan's Task 8 design). The invariant keys off
+  **`mode === "full"` AND empty `priorFindings`**, so neither Phase 2's multi-round path
+  (non-empty priors) nor Phase 3's `within_result` approval re-verification is affected.
 - `runReview(args) → {result, verdict}`; `computeVerdict`; prompt builders; `renderLineNumbered`;
   `parseCriteria`; the OpenAI-compatible provider + registry + `assertCrossModel`.
 - **Stateless `reviewOnce({...}) → {verdict, result}`** — Phase 2 adds a **separate**
@@ -138,11 +187,17 @@ acceptance for the automated layer:
 - A CLI smoke test (mocked provider): `review` prints `{verdict, result}` and exits 0/1;
   `compare` prints `{entries, failures}`; missing author identity → exit 2;
   `--reviewer-base-url` is threaded into the provider spec (assert via the mocked registry).
-- **Approval-leak guard (required, P1):** a mocked reviewer returning a **required** finding with
-  `status: "resolved"` (or any non-`new`) or a non-empty `supersededByFindingIds` must **fail the
-  stateless invariant** → repair attempted → second failure → **exit 2**; it must **never** be
-  treated as inactive and produce `approved`. Add the symmetric positive test: the same finding
-  with `status:"new"` is active and yields `changes_requested`.
+- **Approval-leak guard (required, P1)** — test the invariant **and its mode gate** directly on
+  `validateSemantic`:
+  - `mode:"full"`, `priorFindings:[]`, a finding with `status:"resolved"` (or non-empty
+    `supersededByFindingIds`) → **fail**.
+  - `mode:"within_result"`, `priorFindings:[]`, the same `resolved` finding → **allowed** (this is
+    the approval-artifact re-verification path; it must not be rejected).
+  - `mode:"full"`, **non-empty** `priorFindings`, a `resolved` finding → allowed per the lifecycle
+    rules (a Phase-2 path; in Phase 1 this combination does not occur but the gate must permit it).
+  - End-to-end: a mocked reviewer returning a **required** `resolved` finding in a fresh review
+    fails the invariant → repair → second failure → **exit 2**; it is **never** treated as inactive
+    and approved. Symmetric positive: the same finding as `status:"new"` is active → `changes_requested`.
 
 ## Manual evaluation procedure (the Phase-1 gate)
 
