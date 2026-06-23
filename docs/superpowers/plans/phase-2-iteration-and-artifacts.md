@@ -58,6 +58,41 @@ findings + responses and verifies continuity. The approval state becomes reprodu
 | 19 (remainder) | partial | Add a **new** `reviewDocument` that calls the frozen `reviewOnce` (Phase 1) and adds `selectLineage` + `writeRoundOnce`; returns `{verdict, result, roundPath}`. Do **not** edit `reviewOnce`. (Plan-stage `verifyApproval` stays out — Phase 3.) |
 | 20 (remainder) | partial | Add `respond` subcommand + `--prior-log`, `--new-lineage`, `--out`. (`--prior`/`--prior-approval` stay out — Phase 3.) |
 
+## Frozen `reviewDocument` contract (defined in Phase 2, never edited)
+
+Like `reviewOnce`, `reviewDocument`'s **input type is fixed here with Phase 3's plan-stage fields
+already present but reserved**, so Phase 3 fills them without changing the signature:
+
+```ts
+export interface ReviewDocumentInput {
+  docPath: string;
+  stage: Stage;                                   // Phase 2 supports "spec" only (see below)
+  criteriaPath: string;
+  reviewer: { provider: ReviewerProvider; model: string };
+  reviewerIdentity: Identity;
+  author: Identity;
+  allowSameModel: boolean;
+  priorLogPath?: string;                          // lineage continuation (Phase 2)
+  newLineage: boolean;
+  outDir?: string;
+  // ── reserved for Phase 3 (plan stage); UNSUPPORTED in Phase 2 ──
+  priorPath?: string;                             // approved upstream spec
+  priorApprovalPath?: string;                     // its approval artifact
+  now: () => string;
+  mintLineageId: () => string;
+}
+
+export function reviewDocument(input: ReviewDocumentInput): Promise<{ verdict: Verdict; result: ReviewResult; roundPath: string }>;
+```
+
+- **Phase 2 supports `stage:"spec"` only.** If `stage === "plan"` or `priorPath`/
+  `priorApprovalPath` is supplied, Phase 2 throws a `UsageError` ("plan stage is not supported
+  until Phase 3") — reserved, not silently ignored. Phase 3 activates these fields by adding the
+  plan branch (`verifyApproval` + `requirementIds` + `prior` passthrough to `reviewOnce`), with
+  **no change to this signature**.
+- `reviewDocument` resolves priors from the lineage (`selectLineage`) and calls the frozen
+  `reviewOnce`, passing `priorFindings`/`priorResponses` (and, in Phase 3, `prior`).
+
 ## Preconditions
 
 - **Phase 1 complete** (empirical gate passed; stateless reviewer + full schema + Phase-1
@@ -79,6 +114,9 @@ findings + responses and verifies continuity. The approval state becomes reprodu
 - All pulled tasks' tests per the 21-task plan (test-first, mocked providers, no network):
   envelope validation, parent-hash invariant, write-once collision, finalize-once + no-clobber,
   sidecar re-bind, parent-pair re-verification, `respond` rejects `--out`/stdin.
+- **Reserved-field guard:** `reviewDocument` with `stage:"plan"` (or a `priorPath`/
+  `priorApprovalPath`) throws `UsageError` ("plan stage not supported until Phase 3") — proving
+  the reserved fields are rejected, not silently ignored.
 - `npm run build` exits 0.
 - End-to-end (mocked provider): spec review (round 1) → `respond` finalize → re-run with
   `--prior-log` (round 2 carries prior findings/responses, verifies continuity) → an `approved`

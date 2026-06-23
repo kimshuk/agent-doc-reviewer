@@ -36,7 +36,9 @@ exists. `--compare` runs several reviewer **models** side by side **against a si
   1. criteria coverage **exact-set + linkage** (vs `[CRIT-*]`),
   2. finding-id **uniqueness**,
   3. `feasibilityFindingIds` **3-way** consistency,
-  4. **location bounds** (`where.startLine`/`endLine` within the rendered doc).
+  4. **location bounds** (`where.startLine`/`endLine` within the line count of the file
+     `where.path` names — looked up in `inputLineCounts`, which holds the doc and, when a `prior`
+     is supplied, the prior spec too).
 - **Stateless invariant (closes an approval leak — see below).** Because lifecycle validation is
   deferred to Phase 2 but the schema still *allows* `resolved`/`superseded`, enforce — **only when
   `ctx.mode === "full"` AND `ctx.priorFindings.length === 0`** — that **every finding has
@@ -135,8 +137,8 @@ export interface ReviewOnceInput {
   author: Identity;
   allowSameModel: boolean;
   prior?: {                                       // plan-stage upstream; undefined in Phase 1
-    path: string;
-    rendered: string;                             // line-numbered prior spec
+    path: string;                                 // identifier; the `where.path` a finding cites
+    text: string;                                 // RAW prior spec — reviewOnce renders + counts
     requirementIds: string[];                     // [REQ-*]
   };
   priorFindings: Finding[];                        // carried active findings; [] in Phase 1
@@ -146,11 +148,20 @@ export interface ReviewOnceInput {
 export function reviewOnce(input: ReviewOnceInput): Promise<{ verdict: Verdict; result: ReviewResult }>;
 ```
 
+- **Prior is passed as raw `text`, not pre-rendered** (the reviewer's preferred form): `reviewOnce`
+  derives the line-numbered rendering **and** the line count from `prior.text` itself, so there is
+  a **single source of truth** and no risk of a `rendered`/`lineCount` pair disagreeing. It then
+  adds `inputLineCounts[prior.path]` to the `SemanticContext`, so **location-bounds validation
+  also covers findings that cite the prior spec** (`where.path === prior.path`) — essential for
+  Phase 3 plan review. (The main doc stays `docPath`, read by `reviewOnce`; both doc and prior end
+  up in `inputLineCounts`.)
+
 - **Phase 1** calls it with `stage:"spec"`, `prior: undefined`, `priorFindings: []`,
   `priorResponses: []`. With empty priors + `full` mode, the stateless invariant applies.
 - **Phase 2** supplies `priorFindings`/`priorResponses` (resolved from the lineage by the new
   `reviewDocument` wrapper); `validateSemantic` then runs the lifecycle checks. Same signature.
-- **Phase 3** supplies `prior` (plan-stage `[REQ-*]` + rendered spec) and uses `stage:"plan"`.
+- **Phase 3** supplies `prior` (`{ path, text, requirementIds }` — raw spec text + `[REQ-*]`) and
+  uses `stage:"plan"`.
   Same signature.
 - `reviewOnce` is **stateless**: it never reads/writes the review dir. Resolving priors from disk
   (lineage) and persistence are the *caller's* job (`reviewDocument`, Phase 2). This is what keeps
@@ -263,11 +274,11 @@ This is a **human-adjudicated** evaluation, separate from unit tests. **Approved
 - Required-finding precision **≥ 70%** (formula above).
 - Serious false-positives **≤ 1** **on the real cohort** (matches the metric; not "full dataset").
 - Seeded-defect detection **≥ 80%**.
-- **Evidence sufficiency:** ≥ 8 specs total, ≥ 10 seeded defects in the seeded cohort, and
-  **≥ 10 required findings collected on the real cohort**. If fewer than 10 real-cohort required
-  findings, the result is **"insufficient evidence,"** not passed (expand the real cohort and
-  re-freeze a new run).
-- **At least one** reviewer configuration must pass **all** gates.
+- **Evidence sufficiency (per reviewer configuration):** dataset-level floors ≥ 8 specs total and
+  ≥ 10 seeded defects (shared across configs), **and ≥ 10 required findings collected on the real
+  cohort _by that config_**. A config below 10 real-cohort required findings is **"insufficient
+  evidence,"** not passed (expand the real cohort and re-freeze a new run).
+- **At least one** reviewer configuration must be **evidence-sufficient AND pass all** gates.
 - **No post-hoc tuning:** do not tune prompts, criteria, labels, or thresholds after inspecting
   results. Any tuning starts a **new versioned evaluation run** on a freshly frozen dataset.
 
@@ -294,15 +305,28 @@ Store under `eval/phase-1/<run-id>/` (`run-id` = a frozen label chosen before th
   }
   ```
   The seeded `defects[]` IS the hidden manifest; keep it out of anything fed to the reviewer.
-- **`adjudication.json`** — one row per emitted finding, keyed by reviewer config + spec:
+- **`outputs/<configId>/<specId>.json`** — the **immutable raw reviewer output** (`{verdict,
+  result}`) for each (config, spec) invocation. Written once, never edited. This is the evidence
+  every adjudication row points at, so a `serious_false_positive` count can be re-checked against
+  the actual finding text later.
+- **`adjudication.json`** — one row per emitted finding, each linking to its raw output and
+  carrying the audit fields needed to reproduce the metrics:
   ```json
-  [{ "configId": "cfg-a", "specId": "R1", "cohort": "real", "findingId": "F1",
-     "disposition": "required", "label": "valid_actionable",
-     "matchedDefectId": null, "note": "..." }]
+  [{ "configId": "cfg-a", "specId": "R1", "cohort": "real",
+     "findingId": "F1",
+     "outputPath": "outputs/cfg-a/R1.json", "outputSha256": "...",
+     "claim": "<verbatim finding claim>", "disposition": "required",
+     "label": "false_positive", "seriousFalsePositive": true,
+     "matchedDefectId": null,
+     "adjudicator": "<name/id>", "adjudicatedAt": "2026-07-01T12:00:00Z",
+     "note": "why this label / why serious" }]
   ```
   `cohort` ∈ `real|seeded`; `label` ∈ `valid_actionable|valid_non_actionable|false_positive`;
-  `matchedDefectId` links a seeded-cohort finding to a manifest defect (else `null`).
-- **`metric-summary.json`** — computed, per reviewer config:
+  `seriousFalsePositive` is `true` only for a **required** `false_positive` meeting the serious
+  bar (false otherwise); `matchedDefectId` links a seeded-cohort finding to a manifest defect
+  (else `null`); `outputPath`+`outputSha256` pin the immutable raw output the finding came from;
+  `adjudicator`/`adjudicatedAt` record who judged it and when.
+- **`metric-summary.json`** — computed, **per reviewer config**:
   ```json
   [{ "configId": "cfg-a",
      "realRequiredTotal": 12, "realValidActionable": 9, "precision": 0.75,
@@ -310,10 +334,17 @@ Store under `eval/phase-1/<run-id>/` (`run-id` = a frozen label chosen before th
      "seededDefectsTotal": 11, "seededDefectsDetected": 10, "detection": 0.909,
      "evidenceSufficient": true, "passed": true }]
   ```
-  `passed` is computed strictly from the thresholds above; `evidenceSufficient=false` forces
-  `passed=false` ("insufficient evidence").
+  `seriousFalsePositives` is the count of `seriousFalsePositive:true` rows for that config (so it
+  is re-derivable from `adjudication.json`). `passed` is computed strictly from the thresholds
+  above; `evidenceSufficient=false` forces `passed=false` ("insufficient evidence").
 
-A new run (any tuning) uses a new `run-id`; prior runs are never edited.
+**Evidence sufficiency is per reviewer configuration.** Each config must independently collect
+**≥ 10 required findings on the real cohort** (the dataset-level floors — ≥8 specs, ≥10 seeded
+defects — are shared). A config with fewer than 10 real-cohort required findings is "insufficient
+evidence" and cannot be the one that `passed`. The phase passes when **≥ 1 config is both
+evidence-sufficient and meets all thresholds**.
+
+A new run (any tuning) uses a new `run-id`; prior runs and their `outputs/` are never edited.
 
 ## Completion conditions
 

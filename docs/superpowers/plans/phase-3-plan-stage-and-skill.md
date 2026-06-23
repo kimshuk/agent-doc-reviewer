@@ -44,7 +44,7 @@ the reverse cross-model direction (non-Claude author → Claude reviewer) become
 | 7 (plan-stage) | activate | `upstreamCoverage` exact-set + linkage vs `[REQ-*]`. |
 | 12 Anthropic adapter | full | Deferred from Phase 1 (Disposition A). Forced tool-use structured output, repair-once. |
 | 17 Approval-artifact verification | full | Deterministic selection + recompute + hash/stage/document checks. |
-| 19 (plan-stage) | activate | `reviewDocument` plan branch: `verifyApproval` + `requirementIds` + prior-spec context (the persisting path from Phase 2 + the approval wiring). |
+| 19 (plan-stage) | activate | Fill the **reserved** `ReviewDocumentInput` fields frozen in Phase 2 (`stage:"plan"`, `priorPath`, `priorApprovalPath`) — **no signature change**. Add the plan branch: `verifyApproval` + parse `[REQ-*]` + pass `prior: { path, text, requirementIds }` to the frozen `reviewOnce`. |
 | 20 (plan-stage) | activate | `--prior`, `--prior-approval`; plan-stage `review`/`compare` preflight; Anthropic selectable as reviewer. |
 | 21 Skill + example + full gate | full | `review-loop` SKILL.md, `examples/criteria.spec.md`, full `npm test && npm run build` gate. |
 
