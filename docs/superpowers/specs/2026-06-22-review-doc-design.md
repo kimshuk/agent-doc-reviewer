@@ -1,7 +1,7 @@
 # Design Spec: `review-doc` — cross-model document reviewer
 
 **Date:** 2026-06-22
-**Status:** v9 — frozen v1 scope; reopened for one review round after implementation-soundness findings (plan code under-implemented §6 integrity checks; `[REQ-*]` manifest added so the plan can be reviewed against binding requirements). Implementation plan: `docs/superpowers/plans/2026-06-22-review-doc.md`.
+**Status:** v10 — frozen v1 scope; second soundness pass: author identity always required (override waives equality only), compare mode is a stateless fresh-only diagnostic that persists nothing, immediate parent-pair hashes re-verified on `--prior-log`, sha256 fields format-checked. Implementation plan: `docs/superpowers/plans/2026-06-22-review-doc.md`.
 
 ## Purpose
 
@@ -205,9 +205,9 @@ review-doc <doc.md> --stage <spec|plan> --criteria <path> [options]
 
   --reviewer-provider  openai | anthropic     (env REVIEWER_PROVIDER)
   --reviewer-model     <id>                   (env REVIEWER_MODEL)
-  --author-provider    <name>                 (env AUTHOR_PROVIDER; REQUIRED unless --allow-same-model)
-  --author-model       <id>                   (env AUTHOR_MODEL;     REQUIRED unless --allow-same-model)
-  --allow-same-model   permit author == reviewer (provider+model); off by default
+  --author-provider    <name>                 (env AUTHOR_PROVIDER; ALWAYS REQUIRED)
+  --author-model       <id>                   (env AUTHOR_MODEL;     ALWAYS REQUIRED)
+  --allow-same-model   waive ONLY the author==reviewer equality rejection; off by default
 
   --compare <list>     "anthropic:<model>,openai:<model>" -> run each, log side by side
   --out <dir>          review dir             (default: <doc>.review/ next to the doc)
@@ -224,10 +224,12 @@ publishes the sidecar via temp-file + **atomic no-clobber create** (`linkSync`, 
 `EEXIST`), and marks it finalized (write-once). Exit `0` on success, `2` on validation failure
 or a re-finalize collision.
 
-**Cross-model guard.** Reviewer provider **and** model equal to the declared author's ->
-error before any network call unless `--allow-same-model`. A **missing** author identity is
-**not** treated as "different" — author provider+model are **required** (so the guard cannot
-be silently defeated by omitting them) unless `--allow-same-model` is set. Both identities
+**Cross-model guard.** Author provider+model are **always required** — independent of
+`--allow-same-model` — so the recorded identities are never empty and the guard cannot be
+silently defeated by omitting them (a missing author identity is an error, exit 2, before any
+network call). `--allow-same-model` waives **only** the `author == reviewer` equality
+rejection; it does **not** make the author identity optional. Reviewer provider **and** model
+equal to the declared author's -> error unless `--allow-same-model`. Both identities are
 persisted. The guard applies to **every** reviewer, including each `--compare` target.
 
 **Plan inputs.** `stage:plan` requires `--prior` (≥1 `[REQ-*]`) **and** a recompute-verified
@@ -244,16 +246,18 @@ if rounds exist you must pass one of them. Writes never overwrite an existing ro
 **Exit codes.** Single review: `0` approved, `1` changes_requested, `2` any error (bad key,
 repair failure, same-model guard, malformed criteria/prior, missing/invalid plan approval,
 stale/ambiguous lineage, write collision, incomplete/invalid response sidecar, I/O).
-Compare: prints a JSON array, writes `round-N.compare.json`, `0` if all provider calls
-succeed, `2` if any fails.
+Compare: prints a JSON object `{ entries, failures }` to stdout (both successes **and**
+failures), `0` if all provider calls succeed, `2` if any fails.
 
-**Compare mode is a diagnostic, not an approval path.** It fans the **same** review contract
-out across providers — same criteria/`[CRIT-*]`, and for `stage:plan` the same `--prior`
-(`[REQ-*]`) + upstream-approval verification + line-numbered context — so the side-by-side is
-faithful, and it applies the cross-model guard to **each** target. But it does **not** produce
-an approvable `round-N.json`, records no `verdict` gate, and cannot be consumed as
-`--prior-log`/`--prior-approval`; its `round-N.compare.json` is informational only. So it
-cannot be used to bypass the spec→plan gate.
+**Compare mode is a stateless diagnostic, not an approval path.** It fans the **same** review
+contract out across providers — same criteria/`[CRIT-*]`, and for `stage:plan` the same
+`--prior` (`[REQ-*]`) + upstream-approval verification + line-numbered context — so the
+side-by-side is faithful, and it applies the cross-model guard to **each** target. To keep its
+contract unambiguous in v1 it is **fresh-review only and persists nothing**: `--prior-log`
+with `--compare` is an error, no lineage/round is written, and there is **no
+`round-N.compare.json`** (persistence deferred to v2, §9). Results — both `entries` and
+`failures` — go to **stdout only**. It therefore produces no approvable artifact and cannot be
+consumed as `--prior-log`/`--prior-approval`, so it cannot bypass the spec→plan gate.
 
 **Keys & env.** `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`; missing key -> error (exit 2).
 
@@ -452,8 +456,8 @@ Per-lineage layout next to the doc (default `<doc>.review/`, overridable with `-
   <lineageId>/round-1.responses.json  # author responses (finalize-once sidecar)
   <lineageId>/round-2.json
   <lineageId>/round-2.responses.json
-  <lineageId>/round-2.compare.json    # compare mode (diagnostic)
   <otherLineageId>/round-1.json       # a separate chain; never collides
+                                      # (compare mode persists nothing — stdout only)
 ```
 
 `lineageId` is a sortable timestamp-based id minted when a lineage starts.
@@ -522,11 +526,14 @@ Per-lineage layout next to the doc (default `<doc>.review/`, overridable with `-
 - `--new-lineage` mints a fresh lineage (round 1, no parent); never combined with
   `--prior-log`. Bootstrapping with neither flag is allowed only when no rounds exist.
 - `parent_round_sha256` and `parent_responses_sha256` are recorded as provenance breadcrumbs
-  linking to the immediate prior round and its finalized sidecar; on the next run both are
-  re-verified against the on-disk files (mismatch -> error). **Limitation:** v1 verifies only
-  the *immediate* prior round + sidecar (latest-round + continuity + the two hashes); it does
-  **not** recursively re-verify the whole chain. That is sufficient for staleness/corruption
-  detection; deeper provenance is v2 (§9).
+  linking to the immediate prior round and its finalized sidecar. When `--prior-log` selects
+  round `N` (and `N`'s parent hashes are non-null), those stored hashes are **re-verified
+  against the on-disk `round-(N-1).json` and `round-(N-1).responses.json`** (missing file or
+  hash mismatch -> error) — not merely recorded. **Limitation:** v1 verifies only the
+  *immediate* parent pair of the selected round (latest-round + continuity + the selected
+  round's own sidecar + this one parent-pair hash check); it does **not** recursively re-verify
+  the whole chain back to round 1. That is sufficient for staleness/corruption detection;
+  deeper provenance is v2 (§9).
 
 ### Approval-artifact verification (plan) — corruption / staleness guard, not tamper-proof
 
@@ -621,9 +628,9 @@ part of the spec text and therefore covered by `document_sha256` at approval tim
 - [REQ-IMMUTABLE] `round-N.json` is **write-once** (no overwrite); author responses live in a **finalize-once** `round-N.responses.json` sidecar published with an atomic no-clobber create.
 - [REQ-LINEAGE] Lineage is selected by `--prior-log` (latest-round + stage/criteria/prior continuity) or `--new-lineage`/bootstrap; the child records and re-verifies `parent_round_sha256` **and** `parent_responses_sha256`, and re-validates the consumed sidecar against its parent round.
 - [REQ-APPROVAL] `stage:plan` requires `--prior` (≥1 `[REQ-*]`) and a **recompute-verified**, hash-bound, deterministically-selected upstream spec approval artifact (ambiguous multi-lineage selection is an error).
-- [REQ-IDENTITY] A **cross-model guard** errors before any network call when reviewer == author (provider+model); author identity is **required** unless `--allow-same-model`, and the guard applies to every `--compare` target.
+- [REQ-IDENTITY] A **cross-model guard** errors before any network call when reviewer == author (provider+model); author provider+model are **always required** (never empty, even with `--allow-same-model`, which waives only the equality rejection), and the guard applies to every `--compare` target.
 - [REQ-COVERAGE] Coverage over `[CRIT-*]` (and plan `[REQ-*]`) is an **exact set**, validated semantically; `not_met` on a required criterion or any `[REQ-*]` blocks approval and must link an active finding.
-- [REQ-COMPARE] Compare mode runs the **same review contract** across providers (criteria, plan `--prior`/`[REQ-*]`, upstream-approval verification, cross-model guard) but is **diagnostic only** — it produces no approvable artifact and cannot be consumed as `--prior-log`/`--prior-approval`.
+- [REQ-COMPARE] Compare mode runs the **same review contract** across providers (criteria, plan `--prior`/`[REQ-*]`, upstream-approval verification, cross-model guard) but is a **stateless diagnostic** — fresh-review only (`--prior-log` + `--compare` is an error), persists nothing, prints `{ entries, failures }` to stdout, and cannot be consumed as `--prior-log`/`--prior-approval`.
 - [REQ-SKILL] A `review-loop` skill drives author→review→respond→re-run to `approved` or `MAX_ROUNDS` (default 3), finalizing responses via `review-doc respond`; the gate is advisory.
 - [REQ-TDD] Built test-first; **every provider adapter is mocked** (stubbed `fetch`); **no real network** in tests; explicit `.js` ESM imports; injected clock / lineage-id for determinism.
 
@@ -671,12 +678,16 @@ Runner: `vitest`. Coverage:
 - **Verdict:** active required blocks; MEDIUM-but-required blocks; `resolved` required does
   not; `not_met` on required criterion / `[REQ-*]` blocks; OPTIONAL `not_met` does not;
   `not_feasible` blocks; clean -> `approved`; verdict ignores the response sidecar entirely.
-- **Cross-model guard / keys:** identical provider+model errors; `--allow-same-model` permits;
-  **missing author identity -> error** (not silently passed as `""`) unless `--allow-same-model`;
-  each `--compare` target is guarded too; missing key -> error; both identities persisted.
+- **Cross-model guard / keys:** identical provider+model errors; `--allow-same-model` permits
+  the equality only; **missing author identity -> error even with `--allow-same-model`** (never
+  passed as `""`); each `--compare` target is guarded too; missing key -> error; both
+  identities persisted.
 - **Compare contract:** `--compare` runs the same review contract (criteria, plan
-  `--prior`/`[REQ-*]`, upstream-approval verification, per-target cross-model guard); produces
-  no approvable artifact; a same-model target without `--allow-same-model` -> error.
+  `--prior`/`[REQ-*]`, upstream-approval verification, per-target cross-model guard); **fresh
+  only — `--prior-log` + `--compare` -> error**; **persists nothing**; stdout carries both
+  `entries` and `failures`; a same-model target without `--allow-same-model` -> error.
+- **Hash format:** non-null sha256 fields in round/sidecar envelopes must match
+  `^[0-9a-f]{64}$`; a short/garbage hash -> envelope rejected on read.
 - **Author responses:** exactly one per active finding; missing -> error; duplicate/unknown
   `findingId` -> error; `resolved`/`superseded` need none; missing required `evidence` -> error;
   `needs_user_decision` halts.
@@ -694,6 +705,9 @@ Runner: `vitest`. Coverage:
 - GLM / Gemini adapters (the OpenAI-compatible path is reserved; not wired).
 - Any web server or UI.
 - Optional/weighted-criterion features beyond the `OPTIONAL` marker; `[REQ-*]` optionality.
+- **Compare-mode persistence** (`round-N.compare.json` with a defined round/lineage/collision
+  contract). v1 compare is stdout-only and stateless; persisting it needs a contract that does
+  not muddy the approval lineage, so it is deferred.
 
 **v2 integrity hardening backlog (deliberately deferred per the v1 threat model):**
 - Cryptographic **signing** of round artifacts (authenticity vs accidental corruption).

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a provider-agnostic cross-model document-review core library plus a thin `review-doc` CLI and a `review-loop` workflow skill, per `docs/superpowers/specs/2026-06-22-review-doc-design.md` (v9).
+**Goal:** Build a provider-agnostic cross-model document-review core library plus a thin `review-doc` CLI and a `review-loop` workflow skill, per `docs/superpowers/specs/2026-06-22-review-doc-design.md` (v10).
 
 **Architecture:** A pure core library (`src/core`) owns all review logic — prompt building, schema/semantic validation, verdict, persistence, lineage, approval, providers — with zero knowledge of `process`/argv/stdout/exit. Adapters call provider HTTP APIs via raw `fetch` and force structured JSON output. A thin CLI (`src/cli`) parses args, calls the core, prints JSON, and sets exit codes. Tests mock every provider (no real network).
 
@@ -288,7 +288,7 @@ describe("validateStructural", () => {
 const goodRound = {
   schemaVersion: 1, round: 1, lineageId: "L1", timestamp: "T", stage: "spec",
   author: { provider: "anthropic", model: "a" }, reviewer: { provider: "openai", model: "o" },
-  document_sha256: "d", criteria_sha256: "c", prior_document_sha256: null,
+  document_sha256: "d".repeat(64), criteria_sha256: "c".repeat(64), prior_document_sha256: null,
   parent_round_sha256: null, parent_responses_sha256: null, prior_approval_sha256: null,
   criteriaMeta: { "CRIT-A": { required: true } }, requirementIds: [],
   verdict: "approved", result: good
@@ -314,7 +314,7 @@ describe("validateRoundArtifact", () => {
 
 describe("validateResponsesArtifact", () => {
   const goodSidecar = {
-    round: 1, lineageId: "L1", round_sha256: "abc", finalized: true,
+    round: 1, lineageId: "L1", round_sha256: "a".repeat(64), finalized: true,
     responses: [{ findingId: "F1", response: "accepted_and_revised" }]
   };
   it("accepts a well-formed sidecar", () => {
@@ -401,7 +401,10 @@ const identitySchema = {
   properties: { provider: { type: "string" }, model: { type: "string" } }
 } as const;
 
-const sha256OrNull = { type: ["string", "null"] } as const;
+// Non-null sha256 fields must be lowercase 64-hex; a truncated/garbage hash is corruption.
+// (ajv applies `pattern` only to string instances, so `null` still passes the union types.)
+const sha256Hex = { type: "string", pattern: "^[0-9a-f]{64}$" } as const;
+const sha256OrNull = { type: ["string", "null"], pattern: "^[0-9a-f]{64}$" } as const;
 
 export const ROUND_ARTIFACT_SCHEMA = {
   type: "object", additionalProperties: false,
@@ -416,7 +419,7 @@ export const ROUND_ARTIFACT_SCHEMA = {
     timestamp: { type: "string", minLength: 1 },
     stage: { enum: ["spec", "plan"] },
     author: identitySchema, reviewer: identitySchema,
-    document_sha256: { type: "string" }, criteria_sha256: { type: "string" },
+    document_sha256: sha256Hex, criteria_sha256: sha256Hex,
     prior_document_sha256: sha256OrNull,
     parent_round_sha256: sha256OrNull, parent_responses_sha256: sha256OrNull, prior_approval_sha256: sha256OrNull,
     criteriaMeta: {
@@ -438,7 +441,7 @@ export const RESPONSES_ARTIFACT_SCHEMA = {
   properties: {
     round: { type: "integer", minimum: 1 },
     lineageId: { type: "string", minLength: 1 },
-    round_sha256: { type: "string" },
+    round_sha256: sha256Hex,
     finalized: { const: true },
     responses: {
       type: "array",
@@ -1896,7 +1899,7 @@ import { join } from "node:path";
 const artifact = (round: number): RoundArtifact => ({
   schemaVersion: 1, round, lineageId: "L1", timestamp: "T", stage: "spec",
   author: { provider: "anthropic", model: "a" }, reviewer: { provider: "openai", model: "o" },
-  document_sha256: "d", criteria_sha256: "c", prior_document_sha256: null,
+  document_sha256: "d".repeat(64), criteria_sha256: "c".repeat(64), prior_document_sha256: null,
   parent_round_sha256: null, parent_responses_sha256: null, prior_approval_sha256: null,
   criteriaMeta: { "CRIT-A": { required: true } }, requirementIds: [],
   verdict: "approved",
@@ -2037,7 +2040,7 @@ const result = (findings: Finding[]): ReviewResult => ({
 const artifact = (res: ReviewResult): RoundArtifact => ({
   schemaVersion: 1, round: 1, lineageId: "L1", timestamp: "T", stage: "spec",
   author: { provider: "anthropic", model: "a" }, reviewer: { provider: "openai", model: "o" },
-  document_sha256: "d", criteria_sha256: "c", prior_document_sha256: null,
+  document_sha256: "d".repeat(64), criteria_sha256: "c".repeat(64), prior_document_sha256: null,
   parent_round_sha256: null, parent_responses_sha256: null, prior_approval_sha256: null,
   criteriaMeta: {}, requirementIds: [], verdict: "changes_requested", result: res
 });
@@ -2104,6 +2107,7 @@ Expected: FAIL ("Cannot find module responses.js").
 
 ```ts
 import { writeFileSync, readFileSync, linkSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import type { AuthorResponse, ReviewResult, Finding } from "./types.js";
 import { UsageError } from "./errors.js";
 import { sha256OfFile } from "./hash.js";
@@ -2151,7 +2155,10 @@ export async function finalizeResponses(roundPath: string, responses: AuthorResp
   };
   // Atomic, no-clobber publish: write a temp file, then hard-link it to the sidecar.
   // linkSync throws EEXIST if the sidecar already exists, so an existing file is NEVER overwritten.
-  const tmp = `${sidecar}.tmp-${process.pid}`;
+  // Unique temp name beside the sidecar (same filesystem, so linkSync won't EXDEV). Uses
+  // crypto.randomUUID — NOT process.pid — so core stays free of the `process` global (REQ-CORE).
+  // The temp file is ephemeral (unlinked in finally), so its non-deterministic name is unobservable.
+  const tmp = `${sidecar}.tmp-${randomUUID()}`;
   writeFileSync(tmp, JSON.stringify(artifact, null, 2) + "\n", { flag: "wx" });
   try {
     linkSync(tmp, sidecar);
@@ -2201,7 +2208,7 @@ git commit -m "feat: author-response validation + finalize-once sidecar"
   - `export interface LineageSelection { lineageId: string; round: number; parentRoundSha256: string | null; parentResponsesSha256: string | null; priorFindings: Finding[]; priorResponses: AuthorResponse[] }`.
   - `export async function selectLineage(args: { reviewDir: string; priorLogPath?: string; newLineage: boolean; stage: Stage; criteriaSha256: string; priorDocumentSha256: string | null; mintLineageId: () => string }): Promise<LineageSelection>`.
 
-Behavior (spec §6): `--prior-log` + `--new-lineage` is an error; `--new-lineage` mints a fresh lineage at round 1 (no parent); omitting both is allowed only when the review dir has no rounds (bootstrap, round 1); with `--prior-log` the round file's parent dir is the lineage, it must be that lineage's latest round, its `stage`/`criteria_sha256`/`prior_document_sha256` must match, its sidecar must be finalized **and re-bound to that round** (`round_sha256` equals the round file's hash, `round`/`lineageId` match, and `validateResponses` still passes against the round's `result`), and both parent hashes are recorded.
+Behavior (spec §6): `--prior-log` + `--new-lineage` is an error; `--new-lineage` mints a fresh lineage at round 1 (no parent); omitting both is allowed only when the review dir has no rounds (bootstrap, round 1); with `--prior-log` the round file's parent dir is the lineage, it must be that lineage's latest round, its `stage`/`criteria_sha256`/`prior_document_sha256` must match, its sidecar must be finalized **and re-bound to that round** (`round_sha256` equals the round file's hash, `round`/`lineageId` match, and `validateResponses` still passes against the round's `result`); the selected round's **immediate parent pair** (its non-null `parent_round_sha256`/`parent_responses_sha256`) is **re-verified against the on-disk `round-(N-1)` files** (missing or mismatched -> error; frozen v1: immediate parent only, not the whole chain); and both parent hashes for the new round are recorded.
 
 - [ ] **Step 1: Write the failing test `test/core/lineage.test.ts`**
 
@@ -2210,6 +2217,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { selectLineage } from "../../src/core/lineage.js";
 import { writeRoundOnce, type RoundArtifact } from "../../src/core/persistence.js";
 import { finalizeResponses } from "../../src/core/responses.js";
+import { sha256OfFile } from "../../src/core/hash.js";
 import { UsageError } from "../../src/core/errors.js";
 import type { Finding, ReviewResult } from "../../src/core/types.js";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
@@ -2229,14 +2237,14 @@ const res = (findings: Finding[]): ReviewResult => ({
 const art = (over: Partial<RoundArtifact>): RoundArtifact => ({
   schemaVersion: 1, round: 1, lineageId: "L1", timestamp: "T", stage: "spec",
   author: { provider: "anthropic", model: "a" }, reviewer: { provider: "openai", model: "o" },
-  document_sha256: "d", criteria_sha256: "c", prior_document_sha256: null,
+  document_sha256: "d".repeat(64), criteria_sha256: "c".repeat(64), prior_document_sha256: null,
   parent_round_sha256: null, parent_responses_sha256: null, prior_approval_sha256: null,
   criteriaMeta: {}, requirementIds: [], verdict: "changes_requested", result: res([f("F1")]), ...over
 });
 
 let dir = "";
 beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), "rd-")); });
-const common = { reviewDir: dir, stage: "spec" as const, criteriaSha256: "c", priorDocumentSha256: null, mintLineageId: () => "LX" };
+const common = { reviewDir: dir, stage: "spec" as const, criteriaSha256: "c".repeat(64), priorDocumentSha256: null, mintLineageId: () => "LX" };
 
 describe("selectLineage", () => {
   it("bootstraps round 1 in a fresh lineage when no rounds exist", async () => {
@@ -2271,7 +2279,7 @@ describe("selectLineage", () => {
       .rejects.toThrow(UsageError);
   });
   it("rejects a --prior-log whose criteria hash differs", async () => {
-    const roundPath = writeRoundOnce(dir, "L1", 1, art({ criteria_sha256: "different" }));
+    const roundPath = writeRoundOnce(dir, "L1", 1, art({ criteria_sha256: "e".repeat(64) }));
     await finalizeResponses(roundPath, [{ findingId: "F1", response: "accepted_and_revised" }]);
     await expect(selectLineage({ ...common, reviewDir: dir, newLineage: false, priorLogPath: roundPath }))
       .rejects.toThrow(UsageError);
@@ -2290,6 +2298,22 @@ describe("selectLineage", () => {
     bad.round_sha256 = "0".repeat(64);   // no longer matches the round it answers
     await writeFile(sidecar, JSON.stringify(bad));
     await expect(selectLineage({ ...common, reviewDir: dir, newLineage: false, priorLogPath: roundPath }))
+      .rejects.toThrow(UsageError);
+  });
+  it("re-verifies the selected round's parent pair against round-(N-1) on disk", async () => {
+    const r1 = writeRoundOnce(dir, "L1", 1, art({ round: 1 }));
+    const s1 = await finalizeResponses(r1, [{ findingId: "F1", response: "accepted_and_revised" }]);
+    const r2 = writeRoundOnce(dir, "L1", 2, art({
+      round: 2, parent_round_sha256: await sha256OfFile(r1), parent_responses_sha256: await sha256OfFile(s1)
+    }));
+    await finalizeResponses(r2, [{ findingId: "F1", response: "accepted_and_revised" }]);
+    // intact lineage -> selecting round 2 succeeds (next round is 3)
+    await expect(selectLineage({ ...common, reviewDir: dir, newLineage: false, priorLogPath: r2 }))
+      .resolves.toMatchObject({ round: 3 });
+    // corrupt round 1 so its hash no longer matches round 2's recorded parent_round_sha256
+    const mutated = { ...JSON.parse(await readFile(r1, "utf8")), timestamp: "MUTATED" };
+    await writeFile(r1, JSON.stringify(mutated));
+    await expect(selectLineage({ ...common, reviewDir: dir, newLineage: false, priorLogPath: r2 }))
       .rejects.toThrow(UsageError);
   });
   it("errors when rounds exist but neither flag is given", async () => {
@@ -2367,6 +2391,24 @@ export async function selectLineage(args: {
       throw new UsageError(`--prior-log sidecar identity (round ${responses.round}/${responses.lineageId}) does not match round ${priorNum}/${lineageId}`);
     const recheck = validateResponses(responses.responses, prior.result);
     if (!recheck.ok) throw new UsageError(`--prior-log sidecar fails revalidation against its round: ${recheck.errors}`);
+    // Re-verify the selected round's IMMEDIATE parent pair against the on-disk round-(N-1)
+    // files (frozen v1: immediate only — not the whole chain). The round stored these hashes
+    // when it was created; if round-(N-1) or its sidecar was since corrupted/replaced, the
+    // recorded hash no longer matches and we refuse to build on a broken lineage.
+    if (prior.parent_round_sha256 !== null) {
+      const parentPath = join(lineageDir, `round-${priorNum - 1}.json`);
+      if (!existsSync(parentPath))
+        throw new UsageError(`--prior-log round ${priorNum} references a missing parent round-${priorNum - 1}.json`);
+      if (await sha256OfFile(parentPath) !== prior.parent_round_sha256)
+        throw new UsageError(`--prior-log round ${priorNum} parent_round_sha256 does not match round-${priorNum - 1}.json on disk`);
+      if (prior.parent_responses_sha256 !== null) {
+        const parentSidecar = sidecarPathFor(parentPath);
+        if (!existsSync(parentSidecar))
+          throw new UsageError(`--prior-log round ${priorNum} references a missing parent sidecar round-${priorNum - 1}.responses.json`);
+        if (await sha256OfFile(parentSidecar) !== prior.parent_responses_sha256)
+          throw new UsageError(`--prior-log round ${priorNum} parent_responses_sha256 does not match round-${priorNum - 1}.responses.json on disk`);
+      }
+    }
     return {
       lineageId, round: priorNum + 1,
       parentRoundSha256: roundHash,
@@ -2389,7 +2431,7 @@ export async function selectLineage(args: {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/core/lineage.test.ts`
-Expected: PASS (9 tests).
+Expected: PASS (10 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2431,7 +2473,7 @@ const approvedResult: ReviewResult = {
 const art = (over: Partial<RoundArtifact>): RoundArtifact => ({
   schemaVersion: 1, round: 1, lineageId: "L1", timestamp: "T", stage: "spec",
   author: { provider: "anthropic", model: "a" }, reviewer: { provider: "openai", model: "o" },
-  document_sha256: "", criteria_sha256: "c", prior_document_sha256: null,
+  document_sha256: "0".repeat(64), criteria_sha256: "c".repeat(64), prior_document_sha256: null,
   parent_round_sha256: null, parent_responses_sha256: null, prior_approval_sha256: null,
   criteriaMeta: { "CRIT-A": { required: true } }, requirementIds: [],
   verdict: "approved", result: approvedResult, ...over
@@ -2463,7 +2505,7 @@ describe("verifyApproval", () => {
     await expect(verifyApproval({ priorPath: specPath, priorReviewDir: specDir })).rejects.toThrow(UsageError);
   });
   it("rejects when the document hash does not match --prior", async () => {
-    writeRoundOnce(specDir, "L1", 1, art({ document_sha256: "deadbeef" }));
+    writeRoundOnce(specDir, "L1", 1, art({ document_sha256: "f".repeat(64) }));   // valid-format but wrong hash
     await expect(verifyApproval({ priorPath: specPath, priorReviewDir: specDir })).rejects.toThrow(UsageError);
   });
   it("errors when no approved round exists", async () => {
@@ -2869,7 +2911,7 @@ git commit -m "feat: reviewDocument orchestrator + public barrel"
 - Produces:
   - `export interface CliIO { stdout: (s: string) => void; stderr: (s: string) => void }`.
   - `export async function main(argv: string[], env: Record<string, string | undefined>, io: CliIO, deps?: { now?: () => string; mintLineageId?: () => string; makeProvider?: typeof selectProvider }): Promise<number>` — returns the exit code. `deps` is injected in tests to supply a mock provider and deterministic clock; production defaults use the real clock and `selectProvider`.
-  - Subcommands: default (review) `review-doc <doc> --stage ...`; `review-doc respond --round <p> --responses <file>`; compare when `--compare` is present.
+  - Subcommands: default (review) `review-doc <doc> --stage ...`; `review-doc respond --round <p> --responses <file>`; compare when `--compare` is present. Author provider+model are **always required** (a missing identity is exit 2 even with `--allow-same-model`). Compare is **fresh-only** (`--prior-log` + `--compare` -> error), persists nothing, and prints `{ entries, failures }` to stdout.
 
 - [ ] **Step 1: Write the failing test `test/cli/cli.test.ts`**
 
@@ -2939,11 +2981,21 @@ describe("cli review", () => {
     expect(code).toBe(2);
     expect(o.err.join("")).toMatch(/stage/i);
   });
-  it("exits 2 when author identity is omitted without --allow-same-model (guard not silently defeated)", async () => {
+  it("exits 2 when author identity is omitted (guard not silently defeated)", async () => {
     const o = io();
     const code = await main(
       [doc, "--stage", "spec", "--criteria", crit, "--reviewer-provider", "openai", "--reviewer-model", "gpt",
        "--out", join(dir, "out")],
+      { OPENAI_API_KEY: "k" }, o, deps(approved)
+    );
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/author/i);
+  });
+  it("exits 2 when author identity is omitted EVEN WITH --allow-same-model (override waives equality only)", async () => {
+    const o = io();
+    const code = await main(
+      [doc, "--stage", "spec", "--criteria", crit, "--reviewer-provider", "openai", "--reviewer-model", "gpt",
+       "--allow-same-model", "--out", join(dir, "out")],
       { OPENAI_API_KEY: "k" }, o, deps(approved)
     );
     expect(code).toBe(2);
@@ -2957,6 +3009,59 @@ describe("cli review", () => {
       { OPENAI_API_KEY: "k" }, o, deps(approved)
     );
     expect(code).toBe(2);
+  });
+});
+
+describe("cli compare", () => {
+  it("prints { entries, failures } for a spec-stage compare and exits 0", async () => {
+    const o = io();
+    const code = await main(
+      // author differs from BOTH compare targets so the per-target guard passes
+      [doc, "--stage", "spec", "--criteria", crit, "--reviewer-provider", "openai", "--reviewer-model", "gpt",
+       "--author-provider", "google", "--author-model", "gemini", "--compare", "openai:gpt,anthropic:claude"],
+      { OPENAI_API_KEY: "k", ANTHROPIC_API_KEY: "k" }, o, deps(approved)
+    );
+    expect(code).toBe(0);
+    const printed = JSON.parse(o.out.join(""));
+    expect(printed.entries).toHaveLength(2);
+    expect(printed.failures).toHaveLength(0);
+  });
+  it("rejects --prior-log combined with --compare (fresh-only)", async () => {
+    const o = io();
+    const code = await main(
+      [doc, "--stage", "spec", "--criteria", crit, "--reviewer-provider", "openai", "--reviewer-model", "gpt",
+       "--author-provider", "anthropic", "--author-model", "claude",
+       "--compare", "openai:gpt", "--prior-log", join(dir, "x", "round-1.json")],
+      { OPENAI_API_KEY: "k" }, o, deps(approved)
+    );
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/prior-log/i);
+  });
+  it("runs a plan-stage compare against an approved spec prior", async () => {
+    // 1) approve the spec into <spec>.review (default review dir, lineage L1)
+    const spec = join(dir, "up.md");
+    await writeFile(spec, "# up\n- [REQ-CORE] do the core\n");
+    const specCrit = join(dir, "up.crit.md"); await writeFile(specCrit, "- [CRIT-A] keep small\n");
+    const o1 = io();
+    const c1 = await main(
+      [spec, "--stage", "spec", "--criteria", specCrit, "--reviewer-provider", "openai", "--reviewer-model", "gpt",
+       "--author-provider", "google", "--author-model", "gemini"],
+      { OPENAI_API_KEY: "k" }, o1, deps(approved)
+    );
+    expect(c1).toBe(0);
+    // 2) plan-stage compare against the approved spec; result must cover [REQ-CORE]
+    const plan = join(dir, "plan.md"); await writeFile(plan, "# plan\nstep\n");
+    const planApproved: ReviewResult = { ...approved,
+      upstreamCoverage: [{ id: "REQ-CORE", assessment: "met", note: "", findingIds: [] }] };
+    const o2 = io();
+    const c2 = await main(
+      [plan, "--stage", "plan", "--criteria", crit, "--prior", spec,
+       "--reviewer-provider", "openai", "--reviewer-model", "gpt",
+       "--author-provider", "google", "--author-model", "gemini", "--compare", "openai:gpt,anthropic:claude"],
+      { OPENAI_API_KEY: "k", ANTHROPIC_API_KEY: "k" }, o2, deps(planApproved)
+    );
+    expect(c2).toBe(0);
+    expect(JSON.parse(o2.out.join("")).entries).toHaveLength(2);
   });
 });
 
@@ -3045,13 +3150,16 @@ export async function main(
     const allowSameModel = !!values["allow-same-model"];
     const authorProvider = values["author-provider"] ?? env.AUTHOR_PROVIDER;
     const authorModel = values["author-model"] ?? env.AUTHOR_MODEL;
-    // Author identity is REQUIRED unless explicitly waived: a missing identity must not slip
-    // through the cross-model guard as an empty string that can never equal the reviewer.
-    if (!allowSameModel && (!authorProvider || !authorModel))
-      throw new UsageError("author provider/model required (set --author-provider/--author-model, or pass --allow-same-model)");
-    const author = { provider: authorProvider ?? "", model: authorModel ?? "" };
+    // Author identity is ALWAYS required so the recorded identities are never empty.
+    // --allow-same-model only WAIVES the author==reviewer equality rejection (in assertCrossModel);
+    // it does NOT make the identity optional.
+    if (!authorProvider || !authorModel)
+      throw new UsageError("author provider/model are always required (--author-provider/--author-model or AUTHOR_PROVIDER/AUTHOR_MODEL); --allow-same-model only waives the equality check");
+    const author = { provider: authorProvider, model: authorModel };
 
     if (values.compare) {
+      if (values["prior-log"])
+        throw new UsageError("--prior-log cannot be combined with --compare (compare is a fresh-review-only diagnostic; it persists nothing)");
       const specs = values.compare.split(",").map(s => {
         const [provider, model] = s.split(":");
         if (!provider || !model) throw new UsageError(`bad --compare entry: ${s}`);
@@ -3066,8 +3174,9 @@ export async function main(
       const { ids, meta } = parseCriteria(criteriaText);
 
       // Compare runs the SAME review contract as a normal run (criteria + plan prior/[REQ-*] +
-      // upstream-approval verification + line-numbered context). It is diagnostic only: it does
-      // NOT persist an approvable round and cannot be consumed as --prior-log/--prior-approval.
+      // upstream-approval verification + line-numbered context). It is a STATELESS diagnostic:
+      // fresh-review only (no --prior-log above), it persists NOTHING, and both successes and
+      // failures go to stdout. It cannot be consumed as --prior-log/--prior-approval.
       let requirementIds: string[] = [];
       let priorRendered: string | undefined;
       let priorSpecPath: string | undefined;
@@ -3090,7 +3199,7 @@ export async function main(
           priorSpecPath, priorSpecRendered: priorRendered }),
         ctx, criteriaMeta: meta, now
       });
-      io.stdout(JSON.stringify(out.entries, null, 2) + "\n");
+      io.stdout(JSON.stringify({ entries: out.entries, failures: out.failures }, null, 2) + "\n");
       return out.allSucceeded ? 0 : 2;
     }
 
@@ -3128,7 +3237,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/cli/cli.test.ts`
-Expected: PASS (4 tests).
+Expected: PASS (10 tests).
 
 - [ ] **Step 5: Build to confirm the binary compiles**
 
@@ -3273,4 +3382,6 @@ git commit -m "feat: review-loop workflow skill + example criteria"
 
 **Type consistency:** `validateSemantic(result, ctx)` and `SemanticContext` (Tasks 7/8) are consumed unchanged in 13/17/18/19. `RoundArtifact` (Task 14) is consumed by 15/16/17/19. `selectLineage` return shape (`parentRoundSha256`/`parentResponsesSha256`/`priorFindings`/`priorResponses`) matches its use in Task 19. `runReview`/`RunReviewArgs` (Task 13) match 18/19. `finalizeResponses(roundPath, responses)` (Task 15) matches 16/20. `selectProvider(spec, env)` (Task 10) matches 19/20. `validateRoundArtifact`/`validateResponsesArtifact` (Task 2) are consumed by `readRound` (14) / `readResponses` (15); the `RESPONSES_ARTIFACT_SCHEMA` `response` enum mirrors the `AuthorResponse` union (Task 1). `assertCrossModel` (Task 10) and `verifyApproval` (Task 17) are consumed by the CLI (Task 20) for the author-identity guard and the compare-mode preflight.
 
-**Integrity-fix coverage (this revision):** envelope validation on read (Tasks 2/14/15); sidecar re-bind on consume (Task 16); deterministic, ambiguity-failing approval selection (Task 17); author identity required + per-`--compare`-target cross-model guard + compare runs the full review contract (Task 20); `[REQ-*]` manifest authored before approval + requirement→task table (spec §7 + this plan's coverage table). These bring the plan in line with spec §6/§7 (which already mandated the checks) and close the implementation-soundness findings.
+**Integrity-fix coverage (v9):** envelope validation on read (Tasks 2/14/15); sidecar re-bind on consume (Task 16); deterministic, ambiguity-failing approval selection (Task 17); author identity required + per-`--compare`-target cross-model guard + compare runs the full review contract (Task 20); `[REQ-*]` manifest authored before approval + requirement→task table (spec §7 + this plan's coverage table).
+
+**Integrity-fix coverage (v10, second pass):** author provider+model **always** required — `--allow-same-model` waives only the equality check (Task 20); compare is a **stateless fresh-only** diagnostic — `--prior-log` + `--compare` is an error, nothing is persisted, stdout carries `{ entries, failures }`, with a plan-stage compare integration test (Tasks 18/20); core temp-file naming uses `crypto.randomUUID`, **not** `process.pid`, keeping core free of `process` (REQ-CORE, Task 15); the selected round's **immediate parent pair** is re-verified against on-disk `round-(N-1)` files (Task 16); non-null sha256 envelope fields are format-checked `^[0-9a-f]{64}$` (Task 2). These bring the plan in line with spec §6/§7 (which already mandated the checks) and close the implementation-soundness findings.
