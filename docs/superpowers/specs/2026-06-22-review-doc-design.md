@@ -1,7 +1,7 @@
 # Design Spec: `review-doc` — cross-model document reviewer
 
 **Date:** 2026-06-22
-**Status:** v8 — APPROVED (frozen v1; no required findings remain). Implementation plan: `docs/superpowers/plans/2026-06-22-review-doc.md`.
+**Status:** v9 — frozen v1 scope; reopened for one review round after implementation-soundness findings (plan code under-implemented §6 integrity checks; `[REQ-*]` manifest added so the plan can be reviewed against binding requirements). Implementation plan: `docs/superpowers/plans/2026-06-22-review-doc.md`.
 
 ## Purpose
 
@@ -205,26 +205,30 @@ review-doc <doc.md> --stage <spec|plan> --criteria <path> [options]
 
   --reviewer-provider  openai | anthropic     (env REVIEWER_PROVIDER)
   --reviewer-model     <id>                   (env REVIEWER_MODEL)
-  --author-provider    <name>                 (env AUTHOR_PROVIDER)
-  --author-model       <id>                   (env AUTHOR_MODEL)
+  --author-provider    <name>                 (env AUTHOR_PROVIDER; REQUIRED unless --allow-same-model)
+  --author-model       <id>                   (env AUTHOR_MODEL;     REQUIRED unless --allow-same-model)
   --allow-same-model   permit author == reviewer (provider+model); off by default
 
   --compare <list>     "anthropic:<model>,openai:<model>" -> run each, log side by side
   --out <dir>          review dir             (default: <doc>.review/ next to the doc)
 
 review-doc respond --round <lineage/round-N.json> --responses <file|-> [--out <dir>]
-  Validate author responses against round N's active findings and ATOMICALLY FINALIZE
+  Validate author responses against round N's active findings and FINALIZE (no-clobber)
   the write-once <lineage>/round-N.responses.json sidecar. Re-finalizing -> collision error.
 ```
 
 **`respond` subcommand (P1).** The skill records author responses through `respond`, not by
 hand-editing files. It reads responses (a JSON array of `{ findingId, response, evidence? }`),
 validates them against round N's `result` (completeness, evidence, no dup/unknown — §6),
-writes the sidecar via temp-file + atomic rename, and marks it finalized (write-once). Exit
-`0` on success, `2` on validation failure or a re-finalize collision.
+publishes the sidecar via temp-file + **atomic no-clobber create** (`linkSync`, fails
+`EEXIST`), and marks it finalized (write-once). Exit `0` on success, `2` on validation failure
+or a re-finalize collision.
 
 **Cross-model guard.** Reviewer provider **and** model equal to the declared author's ->
-error before any network call unless `--allow-same-model`. Both identities persisted.
+error before any network call unless `--allow-same-model`. A **missing** author identity is
+**not** treated as "different" — author provider+model are **required** (so the guard cannot
+be silently defeated by omitting them) unless `--allow-same-model` is set. Both identities
+persisted. The guard applies to **every** reviewer, including each `--compare` target.
 
 **Plan inputs.** `stage:plan` requires `--prior` (≥1 `[REQ-*]`) **and** a recompute-verified
 approval artifact (`--prior-approval`, else auto-located as the latest approved round in
@@ -242,6 +246,14 @@ repair failure, same-model guard, malformed criteria/prior, missing/invalid plan
 stale/ambiguous lineage, write collision, incomplete/invalid response sidecar, I/O).
 Compare: prints a JSON array, writes `round-N.compare.json`, `0` if all provider calls
 succeed, `2` if any fails.
+
+**Compare mode is a diagnostic, not an approval path.** It fans the **same** review contract
+out across providers — same criteria/`[CRIT-*]`, and for `stage:plan` the same `--prior`
+(`[REQ-*]`) + upstream-approval verification + line-numbered context — so the side-by-side is
+faithful, and it applies the cross-model guard to **each** target. But it does **not** produce
+an approvable `round-N.json`, records no `verdict` gate, and cannot be consumed as
+`--prior-log`/`--prior-approval`; its `round-N.compare.json` is informational only. So it
+cannot be used to bypass the spec→plan gate.
 
 **Keys & env.** `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`; missing key -> error (exit 2).
 
@@ -457,8 +469,10 @@ Per-lineage layout next to the doc (default `<doc>.review/`, overridable with `-
   responses** (§2/§4), so they live outside the immutable artifact — but to keep the record
   reproducible the sidecar is **not** freely mutable for its whole life. It is **drafted then
   finalized** by `review-doc respond` (§3): the command validates the responses against round
-  N's `result`, writes the file with a temp-file + **atomic rename**, and marks it finalized.
-  Once finalized it is **write-once** — a re-finalize attempt is a collision error (exit 2).
+  N's `result`, writes a temp file then publishes it with an **atomic no-clobber create**
+  (temp write + `linkSync`, which fails `EEXIST` rather than overwriting), and marks it
+  finalized. Once finalized it is **write-once** — a re-finalize attempt is a collision error
+  (exit 2).
 - **The child round pins both parents.** When a later run extends the lineage via `--prior-log
   <lineage>/round-N.json`, it requires the round-N sidecar to be **finalized**, reads prior
   findings from the immutable review and responses from the sidecar, and records **both**
@@ -517,6 +531,12 @@ Per-lineage layout next to the doc (default `<doc>.review/`, overridable with `-
 ### Approval-artifact verification (plan) — corruption / staleness guard, not tamper-proof
 
 Loading the upstream spec approval artifact (`round-N.json`):
+0. **select it deterministically.** Use the explicit `--prior-approval` path when given.
+   Otherwise auto-locate under `<prior>.review/`: consider only `approved`, `stage:spec`
+   rounds whose `document_sha256` equals `sha256(--prior)`; within a single lineage pick the
+   highest round; if **more than one lineage** still qualifies, that is **ambiguous** — error
+   and require `--prior-approval` (never silently pick by round number across lineages, which
+   could select a stale lineage). A malformed/unreadable candidate is skipped, not trusted.
 1. validate it against the round schema;
 2. re-run only the **within-result** semantic checks — those computable from the artifact +
    its persisted `criteriaMeta`/`requirementIds` alone (P2): coverage exact-set & linkage;
@@ -568,6 +588,12 @@ A `SKILL.md` driving the loop:
 8. Only after sign-off, advance `spec` -> `plan`: the plan review uses the approved spec as
    `--prior` (with `[REQ-*]` ids) and its approval artifact as `--prior-approval`.
 
+> **`[REQ-*]` ids must already be present in the spec _before_ it is approved.** They are part
+> of the spec text, so they are covered by `document_sha256`; adding them **after** approval
+> would change that hash and invalidate the approval the plan stage verifies. The author writes
+> the manifest (below) as part of authoring the spec; the spec→plan step never edits the
+> approved spec.
+
 **Decision:** authored in-repo at `skills/review-loop/SKILL.md`; installable/symlinkable
 into `~/.claude/skills`.
 
@@ -579,6 +605,27 @@ into `~/.claude/skills`.
 
 True enforcement requires a hook/wrapper checking a valid approval against the **current**
 document hash before the next stage. Deferred (CLI-first / hooks-later).
+
+### Requirements manifest (`[REQ-*]`) — binding for the plan review
+
+These are the binding requirements this spec imposes on the implementation plan. They are
+anchored list-item declarations so `criteria.ts` extracts them when the **plan** is reviewed
+with this spec as `--prior`; the plan's `upstreamCoverage` must cover this exact set. They are
+part of the spec text and therefore covered by `document_sha256` at approval time.
+
+- [REQ-CORE] Provider-agnostic **core library** (zero `process`/`argv`/`stdout` knowledge) with a thin CLI as the only v1 transport; no web server, no UI.
+- [REQ-PROVIDER] Swappable `ReviewerProvider` with **OpenAI** and **Anthropic** adapters built on raw `fetch` (no vendor SDK), each owning its structured-output forcing (json_schema / forced tool-use); selectable via flags/env.
+- [REQ-CONSTANT] The rubric, JSON output schema, and reviewer/system prompts are **constant across providers and rounds** (the control variable); only the provider/model varies.
+- [REQ-VALIDATE] Parsed output is validated **structurally (ajv) and semantically**; on failure exactly **one** repair retry carrying prior invalid output + combined errors, then fail (exit 2).
+- [REQ-VERDICT] The verdict is **computed in code** as a pure function of `result` + `criteriaMeta` + `requirementIds` and **never reads author responses**; `approved` iff feasibility ≠ `not_feasible`, no active required finding, no `not_met` required criterion, and no `not_met` `[REQ-*]`.
+- [REQ-IMMUTABLE] `round-N.json` is **write-once** (no overwrite); author responses live in a **finalize-once** `round-N.responses.json` sidecar published with an atomic no-clobber create.
+- [REQ-LINEAGE] Lineage is selected by `--prior-log` (latest-round + stage/criteria/prior continuity) or `--new-lineage`/bootstrap; the child records and re-verifies `parent_round_sha256` **and** `parent_responses_sha256`, and re-validates the consumed sidecar against its parent round.
+- [REQ-APPROVAL] `stage:plan` requires `--prior` (≥1 `[REQ-*]`) and a **recompute-verified**, hash-bound, deterministically-selected upstream spec approval artifact (ambiguous multi-lineage selection is an error).
+- [REQ-IDENTITY] A **cross-model guard** errors before any network call when reviewer == author (provider+model); author identity is **required** unless `--allow-same-model`, and the guard applies to every `--compare` target.
+- [REQ-COVERAGE] Coverage over `[CRIT-*]` (and plan `[REQ-*]`) is an **exact set**, validated semantically; `not_met` on a required criterion or any `[REQ-*]` blocks approval and must link an active finding.
+- [REQ-COMPARE] Compare mode runs the **same review contract** across providers (criteria, plan `--prior`/`[REQ-*]`, upstream-approval verification, cross-model guard) but is **diagnostic only** — it produces no approvable artifact and cannot be consumed as `--prior-log`/`--prior-approval`.
+- [REQ-SKILL] A `review-loop` skill drives author→review→respond→re-run to `approved` or `MAX_ROUNDS` (default 3), finalizing responses via `review-doc respond`; the gate is advisory.
+- [REQ-TDD] Built test-first; **every provider adapter is mocked** (stubbed `fetch`); **no real network** in tests; explicit `.js` ESM imports; injected clock / lineage-id for determinism.
 
 ---
 
@@ -599,27 +646,37 @@ Runner: `vitest`. Coverage:
   active finding -> fail; terminal may be omitted; superseded without active replacement ->
   fail; required superseded without active required replacement -> fail.
 - **Feasibility / location:** `feasibilityFindingIds` 3-way + active; bad `where` -> fail.
+- **Envelope validation:** `readRound` / `readResponses` reject malformed or non-JSON
+  artifacts (bad `verdict` enum, missing hash field, malformed nested `result`, `finalized !=
+  true`) — a stale/corrupt envelope is never blindly cast.
 - **Immutability & sidecar (P1.1, round-7 P1):** `round-N.json` written once; second write ->
   collision error; round artifact contains **no** responses; `verdict` recomputes identically
-  with responses absent; `review-doc respond` validates against the round's result and writes
-  the sidecar atomically with `finalized: true`; re-finalize -> collision error; sidecar
-  `round_sha256` mismatch -> error; a child run records `parent_responses_sha256` and **errors
-  if the finalized sidecar is mutated afterward** (hash mismatch); consuming an un-finalized
-  sidecar -> error.
+  with responses absent; `review-doc respond` validates against the round's result and
+  publishes the sidecar via **no-clobber create** with `finalized: true`; re-finalize ->
+  collision error; sidecar `round_sha256` mismatch -> error; a child run records
+  `parent_responses_sha256` and **errors if the finalized sidecar is mutated afterward** (hash
+  mismatch); consuming an un-finalized sidecar -> error.
 - **Lineage (P1.2):** `--prior-log` selects the subdir and writes `round-(N+1)` there; stale
   (not latest) -> error; stage/criteria/prior mismatch -> error; `--new-lineage` + `--prior-log`
   -> error; bootstrap allowed only when empty; cross-lineage no overwrite; `parent_round_sha256`
-  recorded; chain is **not** recursively re-verified (immediate-only).
+  recorded; the consumed sidecar is **re-bound** to its round (`round_sha256`/`round`/`lineageId`
+  match + `validateResponses` re-passes) so a sidecar mutated after the child was created ->
+  error; chain is **not** recursively re-verified (immediate-only).
 - **Approval artifact:** plan missing artifact -> error; `stage != spec` / `document_sha256 !=
-  sha256(--prior)` -> error; stored `verdict` flipped vs recomputed -> error; valid verifies +
-  hash recorded.
+  sha256(--prior)` -> error; stored `verdict` flipped vs recomputed -> error; **>1 lineage with
+  an approved round for `--prior` -> ambiguous error** (explicit `--prior-approval` accepted); a
+  malformed candidate is skipped, not trusted; valid verifies + hash recorded.
 - **Repair retry:** repair request includes prior invalid output + combined errors + context +
   schema; bad-then-good succeeds; bad-then-bad throws.
 - **Verdict:** active required blocks; MEDIUM-but-required blocks; `resolved` required does
   not; `not_met` on required criterion / `[REQ-*]` blocks; OPTIONAL `not_met` does not;
   `not_feasible` blocks; clean -> `approved`; verdict ignores the response sidecar entirely.
 - **Cross-model guard / keys:** identical provider+model errors; `--allow-same-model` permits;
-  missing key -> error; both identities persisted.
+  **missing author identity -> error** (not silently passed as `""`) unless `--allow-same-model`;
+  each `--compare` target is guarded too; missing key -> error; both identities persisted.
+- **Compare contract:** `--compare` runs the same review contract (criteria, plan
+  `--prior`/`[REQ-*]`, upstream-approval verification, per-target cross-model guard); produces
+  no approvable artifact; a same-model target without `--allow-same-model` -> error.
 - **Author responses:** exactly one per active finding; missing -> error; duplicate/unknown
   `findingId` -> error; `resolved`/`superseded` need none; missing required `evidence` -> error;
   `needs_user_decision` halts.

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a provider-agnostic cross-model document-review core library plus a thin `review-doc` CLI and a `review-loop` workflow skill, per `docs/superpowers/specs/2026-06-22-review-doc-design.md` (v8).
+**Goal:** Build a provider-agnostic cross-model document-review core library plus a thin `review-doc` CLI and a `review-loop` workflow skill, per `docs/superpowers/specs/2026-06-22-review-doc-design.md` (v9).
 
 **Architecture:** A pure core library (`src/core`) owns all review logic — prompt building, schema/semantic validation, verdict, persistence, lineage, approval, providers — with zero knowledge of `process`/argv/stdout/exit. Adapters call provider HTTP APIs via raw `fetch` and force structured JSON output. A thin CLI (`src/cli`) parses args, calls the core, prints JSON, and sets exit codes. Tests mock every provider (no real network).
 
@@ -21,6 +21,26 @@
 - **Exit codes:** single review `0` approved / `1` changes_requested / `2` any error; compare `0` all-success / `2` any-failure.
 - **Determinism in tests:** inject `now()` (timestamp/lineageId source) — never call `Date.now()` directly in core; the CLI supplies the real clock.
 
+## Requirement coverage (spec `[REQ-*]` → tasks)
+
+Each binding requirement from the spec's `[REQ-*]` manifest maps to the tasks that satisfy it:
+
+| `[REQ-*]` | Satisfied by tasks |
+|-----------|--------------------|
+| REQ-CORE | 1 (scaffolding/types), 19 (`reviewDocument` core), 20 (thin CLI) |
+| REQ-PROVIDER | 10 (registry), 11 (OpenAI adapter), 12 (Anthropic adapter) |
+| REQ-CONSTANT | 2 (constant schema), 9 (constant prompts) |
+| REQ-VALIDATE | 2 (structural), 7–8 (semantic), 13 (`runReview` repair-once) |
+| REQ-VERDICT | 6 (`computeVerdict`, pure) |
+| REQ-IMMUTABLE | 14 (write-once round), 15 (finalize-once sidecar) |
+| REQ-LINEAGE | 16 (`selectLineage` + sidecar re-bind + parent hashes) |
+| REQ-APPROVAL | 17 (`verifyApproval`, deterministic + recompute) |
+| REQ-IDENTITY | 10 (`assertCrossModel`), 20 (author identity required; per-compare guard) |
+| REQ-COVERAGE | 5 (`[CRIT-*]`/`[REQ-*]` parse), 7 (coverage exact-set) |
+| REQ-COMPARE | 18 (`runCompare`), 20 (compare shares contract, non-approving) |
+| REQ-SKILL | 21 (`review-loop` SKILL.md) |
+| REQ-TDD | every task (failing test first; mocked providers; no real network) |
+
 ---
 
 ## File Structure
@@ -31,7 +51,7 @@ review-doc/
   src/core/
     types.ts          # all shared types
     errors.ts         # UsageError, ValidationError
-    schema.ts         # REVIEW_SCHEMA constant + validateStructural (ajv)
+    schema.ts         # REVIEW_SCHEMA + ROUND_ARTIFACT_SCHEMA + RESPONSES_ARTIFACT_SCHEMA + validators (ajv)
     hash.ts           # sha256, sha256OfFile
     render.ts         # renderLineNumbered, lineCount
     criteria.ts       # parseCriteria, parseRequirements (anchored, code-fence aware)
@@ -222,12 +242,15 @@ git commit -m "feat: project scaffolding, shared types, error classes"
 - Produces:
   - `export const REVIEW_SCHEMA: object` — the constant schema (spec §4).
   - `export function validateStructural(data: unknown): { ok: true } | { ok: false; errors: string }`.
+  - `export const ROUND_ARTIFACT_SCHEMA: object` — the full `round-N.json` envelope schema (identities, hashes, `criteriaMeta`/`requirementIds`, `verdict`, and `result` via `REVIEW_SCHEMA`); spec §6.
+  - `export function validateRoundArtifact(data: unknown): { ok: true } | { ok: false; errors: string }` — used by `readRound`/`verifyApproval` so a malformed or stale envelope is rejected, not blindly cast.
+  - `export const RESPONSES_ARTIFACT_SCHEMA: object` + `export function validateResponsesArtifact(data: unknown): { ok: true } | { ok: false; errors: string }` — the `round-N.responses.json` sidecar envelope; used by `readResponses`.
 
 - [ ] **Step 1: Write the failing test `test/core/schema.test.ts`**
 
 ```ts
 import { describe, it, expect } from "vitest";
-import { validateStructural } from "../../src/core/schema.js";
+import { validateStructural, validateRoundArtifact, validateResponsesArtifact } from "../../src/core/schema.js";
 
 const good = {
   feasibility: "feasible", feasibilityRationale: "ok", feasibilityFindingIds: [],
@@ -259,6 +282,51 @@ describe("validateStructural", () => {
   it("rejects startLine < 1", () => {
     const bad = structuredClone(good) as any; bad.findings[0].where.startLine = 0;
     expect(validateStructural(bad).ok).toBe(false);
+  });
+});
+
+const goodRound = {
+  schemaVersion: 1, round: 1, lineageId: "L1", timestamp: "T", stage: "spec",
+  author: { provider: "anthropic", model: "a" }, reviewer: { provider: "openai", model: "o" },
+  document_sha256: "d", criteria_sha256: "c", prior_document_sha256: null,
+  parent_round_sha256: null, parent_responses_sha256: null, prior_approval_sha256: null,
+  criteriaMeta: { "CRIT-A": { required: true } }, requirementIds: [],
+  verdict: "approved", result: good
+};
+
+describe("validateRoundArtifact", () => {
+  it("accepts a well-formed round envelope", () => {
+    expect(validateRoundArtifact(goodRound).ok).toBe(true);
+  });
+  it("rejects a missing envelope field (document_sha256)", () => {
+    const bad = structuredClone(goodRound) as any; delete bad.document_sha256;
+    expect(validateRoundArtifact(bad).ok).toBe(false);
+  });
+  it("rejects a bad verdict enum", () => {
+    const bad = structuredClone(goodRound) as any; bad.verdict = "ok";
+    expect(validateRoundArtifact(bad).ok).toBe(false);
+  });
+  it("rejects a malformed nested result", () => {
+    const bad = structuredClone(goodRound) as any; bad.result.feasibility = "maybe";
+    expect(validateRoundArtifact(bad).ok).toBe(false);
+  });
+});
+
+describe("validateResponsesArtifact", () => {
+  const goodSidecar = {
+    round: 1, lineageId: "L1", round_sha256: "abc", finalized: true,
+    responses: [{ findingId: "F1", response: "accepted_and_revised" }]
+  };
+  it("accepts a well-formed sidecar", () => {
+    expect(validateResponsesArtifact(goodSidecar).ok).toBe(true);
+  });
+  it("rejects finalized:false", () => {
+    const bad = structuredClone(goodSidecar) as any; bad.finalized = false;
+    expect(validateResponsesArtifact(bad).ok).toBe(false);
+  });
+  it("rejects an unknown response enum", () => {
+    const bad = structuredClone(goodSidecar) as any; bad.responses[0].response = "ignored";
+    expect(validateResponsesArtifact(bad).ok).toBe(false);
   });
 });
 ```
@@ -328,19 +396,92 @@ export const REVIEW_SCHEMA = {
   }
 } as const;
 
+const identitySchema = {
+  type: "object", additionalProperties: false, required: ["provider", "model"],
+  properties: { provider: { type: "string" }, model: { type: "string" } }
+} as const;
+
+const sha256OrNull = { type: ["string", "null"] } as const;
+
+export const ROUND_ARTIFACT_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["schemaVersion", "round", "lineageId", "timestamp", "stage", "author", "reviewer",
+             "document_sha256", "criteria_sha256", "prior_document_sha256", "parent_round_sha256",
+             "parent_responses_sha256", "prior_approval_sha256", "criteriaMeta", "requirementIds",
+             "verdict", "result"],
+  properties: {
+    schemaVersion: { const: 1 },
+    round: { type: "integer", minimum: 1 },
+    lineageId: { type: "string", minLength: 1 },
+    timestamp: { type: "string", minLength: 1 },
+    stage: { enum: ["spec", "plan"] },
+    author: identitySchema, reviewer: identitySchema,
+    document_sha256: { type: "string" }, criteria_sha256: { type: "string" },
+    prior_document_sha256: sha256OrNull,
+    parent_round_sha256: sha256OrNull, parent_responses_sha256: sha256OrNull, prior_approval_sha256: sha256OrNull,
+    criteriaMeta: {
+      type: "object",
+      additionalProperties: {
+        type: "object", additionalProperties: false, required: ["required"],
+        properties: { required: { type: "boolean" } }
+      }
+    },
+    requirementIds: { type: "array", items: { type: "string" } },
+    verdict: { enum: ["approved", "changes_requested"] },
+    result: REVIEW_SCHEMA
+  }
+} as const;
+
+export const RESPONSES_ARTIFACT_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["round", "lineageId", "round_sha256", "finalized", "responses"],
+  properties: {
+    round: { type: "integer", minimum: 1 },
+    lineageId: { type: "string", minLength: 1 },
+    round_sha256: { type: "string" },
+    finalized: { const: true },
+    responses: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false, required: ["findingId", "response"],
+        properties: {
+          findingId: { type: "string" },
+          response: { enum: ["accepted_and_revised", "rejected_with_evidence", "already_addressed", "needs_user_decision"] },
+          evidence: { type: "string" }
+        }
+      }
+    }
+  }
+} as const;
+
 const ajv = new Ajv({ allErrors: true });
 const validate = ajv.compile(REVIEW_SCHEMA as object);
+const validateRound = ajv.compile(ROUND_ARTIFACT_SCHEMA as object);
+const validateResponsesEnvelope = ajv.compile(RESPONSES_ARTIFACT_SCHEMA as object);
 
 export function validateStructural(data: unknown): { ok: true } | { ok: false; errors: string } {
   if (validate(data)) return { ok: true };
   return { ok: false, errors: ajv.errorsText(validate.errors, { separator: "; " }) };
 }
+
+export function validateRoundArtifact(data: unknown): { ok: true } | { ok: false; errors: string } {
+  if (validateRound(data)) return { ok: true };
+  return { ok: false, errors: ajv.errorsText(validateRound.errors, { separator: "; " }) };
+}
+
+export function validateResponsesArtifact(data: unknown): { ok: true } | { ok: false; errors: string } {
+  if (validateResponsesEnvelope(data)) return { ok: true };
+  return { ok: false, errors: ajv.errorsText(validateResponsesEnvelope.errors, { separator: "; " }) };
+}
 ```
+
+> Note: the `response` enum here mirrors the `AuthorResponse` union in `types.ts` (Task 1) and
+> must stay in sync with it; both are part of the constant contract.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/core/schema.test.ts`
-Expected: PASS (5 tests).
+Expected: PASS (12 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1735,11 +1876,11 @@ git commit -m "feat: runReview — validate, one repair retry, then verdict"
 - Test: `test/core/persistence.test.ts`
 
 **Interfaces:**
-- Consumes: `Identity`, `CriteriaMeta`, `ReviewResult`, `Verdict`, `Stage`, `UsageError`.
+- Consumes: `Identity`, `CriteriaMeta`, `ReviewResult`, `Verdict`, `Stage`, `UsageError`, `validateRoundArtifact`.
 - Produces:
   - `export interface RoundArtifact { schemaVersion: 1; round: number; lineageId: string; timestamp: string; stage: Stage; author: Identity; reviewer: Identity; document_sha256: string; criteria_sha256: string; prior_document_sha256: string | null; parent_round_sha256: string | null; parent_responses_sha256: string | null; prior_approval_sha256: string | null; criteriaMeta: CriteriaMeta; requirementIds: string[]; verdict: Verdict; result: ReviewResult }`.
   - `export function writeRoundOnce(reviewDir: string, lineageId: string, round: number, artifact: RoundArtifact): string` — creates `<reviewDir>/<lineageId>/round-<round>.json`; throws `UsageError` if it already exists; returns the path.
-  - `export function readRound(path: string): RoundArtifact`.
+  - `export function readRound(path: string): RoundArtifact` — parses **and validates** the full envelope via `validateRoundArtifact`; throws `UsageError` on bad JSON or a malformed/stale envelope (so no consumer ever trusts an unvalidated cast).
   - `export function listRounds(lineageDir: string): number[]` — sorted ascending; `[]` if the dir is absent.
 
 - [ ] **Step 1: Write the failing test `test/core/persistence.test.ts`**
@@ -1748,7 +1889,7 @@ git commit -m "feat: runReview — validate, one repair retry, then verdict"
 import { describe, it, expect, beforeEach } from "vitest";
 import { writeRoundOnce, readRound, listRounds, type RoundArtifact } from "../../src/core/persistence.js";
 import { UsageError } from "../../src/core/errors.js";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1782,6 +1923,13 @@ describe("persistence", () => {
     expect(listRounds(join(dir, "L1"))).toEqual([1, 2]);
     expect(listRounds(join(dir, "nope"))).toEqual([]);
   });
+  it("rejects a malformed round artifact on read (corruption/stale guard)", async () => {
+    const p = writeRoundOnce(dir, "L1", 1, artifact(1));
+    await writeFile(p.replace(/round-1\.json$/, "round-9.json"), '{"schemaVersion":1,"round":9}');
+    expect(() => readRound(p.replace(/round-1\.json$/, "round-9.json"))).toThrow(UsageError);
+    await writeFile(p.replace(/round-1\.json$/, "round-8.json"), "not json");
+    expect(() => readRound(p.replace(/round-1\.json$/, "round-8.json"))).toThrow(UsageError);
+  });
 });
 ```
 
@@ -1797,6 +1945,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 
 import { join } from "node:path";
 import type { Identity, CriteriaMeta, ReviewResult, Verdict, Stage } from "./types.js";
 import { UsageError } from "./errors.js";
+import { validateRoundArtifact } from "./schema.js";
 
 export interface RoundArtifact {
   schemaVersion: 1; round: number; lineageId: string; timestamp: string; stage: Stage;
@@ -1817,7 +1966,12 @@ export function writeRoundOnce(reviewDir: string, lineageId: string, round: numb
 }
 
 export function readRound(path: string): RoundArtifact {
-  return JSON.parse(readFileSync(path, "utf8")) as RoundArtifact;
+  let parsed: unknown;
+  try { parsed = JSON.parse(readFileSync(path, "utf8")); }
+  catch { throw new UsageError(`Round artifact is not valid JSON: ${path}`); }
+  const v = validateRoundArtifact(parsed);
+  if (!v.ok) throw new UsageError(`Round artifact is malformed (${path}): ${v.errors}`);
+  return parsed as RoundArtifact;
 }
 
 export function listRounds(lineageDir: string): number[] {
@@ -1833,7 +1987,7 @@ export function listRounds(lineageDir: string): number[] {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/core/persistence.test.ts`
-Expected: PASS (3 tests).
+Expected: PASS (4 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1856,7 +2010,7 @@ git commit -m "feat: write-once per-lineage round persistence"
   - `export interface ResponsesArtifact { round: number; lineageId: string; round_sha256: string; finalized: true; responses: AuthorResponse[] }`.
   - `export function validateResponses(responses: AuthorResponse[], result: ReviewResult): { ok: true } | { ok: false; errors: string }` — exactly one response per active finding; none for terminal findings; no unknown/duplicate `findingId`; non-empty `evidence` required for `rejected_with_evidence`/`already_addressed`.
   - `export async function finalizeResponses(roundPath: string, responses: AuthorResponse[]): Promise<string>` — validates against the round's result, computes `round_sha256` from the round file, publishes `<roundPath without .json>.responses.json` with `finalized: true` via an **atomic no-clobber** create (write temp, then `linkSync` which fails `EEXIST` if the sidecar exists — an existing sidecar is never overwritten); throws `UsageError` if the sidecar already exists or validation fails.
-  - `export function readResponses(sidecarPath: string): ResponsesArtifact`.
+  - `export function readResponses(sidecarPath: string): ResponsesArtifact` — parses **and validates** the sidecar envelope via `validateResponsesArtifact`; throws `UsageError` on bad JSON / malformed shape.
   - `export function sidecarPathFor(roundPath: string): string`.
 
 - [ ] **Step 1: Write the failing test `test/core/responses.test.ts`**
@@ -1954,6 +2108,7 @@ import type { AuthorResponse, ReviewResult, Finding } from "./types.js";
 import { UsageError } from "./errors.js";
 import { sha256OfFile } from "./hash.js";
 import { readRound } from "./persistence.js";
+import { validateResponsesArtifact } from "./schema.js";
 
 export interface ResponsesArtifact {
   round: number; lineageId: string; round_sha256: string; finalized: true; responses: AuthorResponse[];
@@ -2011,7 +2166,12 @@ export async function finalizeResponses(roundPath: string, responses: AuthorResp
 }
 
 export function readResponses(sidecarPath: string): ResponsesArtifact {
-  return JSON.parse(readFileSync(sidecarPath, "utf8")) as ResponsesArtifact;
+  let parsed: unknown;
+  try { parsed = JSON.parse(readFileSync(sidecarPath, "utf8")); }
+  catch { throw new UsageError(`Responses sidecar is not valid JSON: ${sidecarPath}`); }
+  const v = validateResponsesArtifact(parsed);
+  if (!v.ok) throw new UsageError(`Responses sidecar is malformed (${sidecarPath}): ${v.errors}`);
+  return parsed as ResponsesArtifact;
 }
 ```
 
@@ -2036,12 +2196,12 @@ git commit -m "feat: author-response validation + finalize-once sidecar"
 - Test: `test/core/lineage.test.ts`
 
 **Interfaces:**
-- Consumes: `Stage`, `Finding`, `AuthorResponse`, `UsageError`, `readRound`, `listRounds`, `sha256OfFile`, `readResponses`, `sidecarPathFor`.
+- Consumes: `Stage`, `Finding`, `AuthorResponse`, `UsageError`, `readRound`, `listRounds`, `sha256OfFile`, `readResponses`, `sidecarPathFor`, `validateResponses`.
 - Produces:
   - `export interface LineageSelection { lineageId: string; round: number; parentRoundSha256: string | null; parentResponsesSha256: string | null; priorFindings: Finding[]; priorResponses: AuthorResponse[] }`.
   - `export async function selectLineage(args: { reviewDir: string; priorLogPath?: string; newLineage: boolean; stage: Stage; criteriaSha256: string; priorDocumentSha256: string | null; mintLineageId: () => string }): Promise<LineageSelection>`.
 
-Behavior (spec §6): `--prior-log` + `--new-lineage` is an error; `--new-lineage` mints a fresh lineage at round 1 (no parent); omitting both is allowed only when the review dir has no rounds (bootstrap, round 1); with `--prior-log` the round file's parent dir is the lineage, it must be that lineage's latest round, its `stage`/`criteria_sha256`/`prior_document_sha256` must match, its sidecar must be finalized, and both parent hashes are recorded.
+Behavior (spec §6): `--prior-log` + `--new-lineage` is an error; `--new-lineage` mints a fresh lineage at round 1 (no parent); omitting both is allowed only when the review dir has no rounds (bootstrap, round 1); with `--prior-log` the round file's parent dir is the lineage, it must be that lineage's latest round, its `stage`/`criteria_sha256`/`prior_document_sha256` must match, its sidecar must be finalized **and re-bound to that round** (`round_sha256` equals the round file's hash, `round`/`lineageId` match, and `validateResponses` still passes against the round's `result`), and both parent hashes are recorded.
 
 - [ ] **Step 1: Write the failing test `test/core/lineage.test.ts`**
 
@@ -2052,7 +2212,7 @@ import { writeRoundOnce, type RoundArtifact } from "../../src/core/persistence.j
 import { finalizeResponses } from "../../src/core/responses.js";
 import { UsageError } from "../../src/core/errors.js";
 import type { Finding, ReviewResult } from "../../src/core/types.js";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2123,6 +2283,15 @@ describe("selectLineage", () => {
     await expect(selectLineage({ ...common, reviewDir: dir, newLineage: false, priorLogPath: roundPath }))
       .rejects.toThrow(UsageError);
   });
+  it("rejects a --prior-log whose finalized sidecar was mutated after the fact (stale/swap guard)", async () => {
+    const roundPath = writeRoundOnce(dir, "L1", 1, art({}));
+    const sidecar = await finalizeResponses(roundPath, [{ findingId: "F1", response: "accepted_and_revised" }]);
+    const bad = JSON.parse(await readFile(sidecar, "utf8"));
+    bad.round_sha256 = "0".repeat(64);   // no longer matches the round it answers
+    await writeFile(sidecar, JSON.stringify(bad));
+    await expect(selectLineage({ ...common, reviewDir: dir, newLineage: false, priorLogPath: roundPath }))
+      .rejects.toThrow(UsageError);
+  });
   it("errors when rounds exist but neither flag is given", async () => {
     const roundPath = writeRoundOnce(dir, "L1", 1, art({}));
     await finalizeResponses(roundPath, [{ findingId: "F1", response: "accepted_and_revised" }]);
@@ -2146,7 +2315,7 @@ import type { Stage, Finding, AuthorResponse } from "./types.js";
 import { UsageError } from "./errors.js";
 import { readRound, listRounds } from "./persistence.js";
 import { sha256OfFile } from "./hash.js";
-import { readResponses, sidecarPathFor } from "./responses.js";
+import { readResponses, sidecarPathFor, validateResponses } from "./responses.js";
 
 export interface LineageSelection {
   lineageId: string; round: number;
@@ -2186,11 +2355,21 @@ export async function selectLineage(args: {
     if (prior.prior_document_sha256 !== args.priorDocumentSha256) throw new UsageError("--prior-log prior-document hash differs");
     const sidecar = sidecarPathFor(path);
     if (!existsSync(sidecar)) throw new UsageError(`--prior-log responses sidecar is not finalized: ${sidecar}`);
-    const responses = readResponses(sidecar);
+    const responses = readResponses(sidecar);   // validates the sidecar envelope shape
     if (responses.finalized !== true) throw new UsageError("--prior-log responses sidecar is not finalized");
+    // Re-bind the sidecar to THIS round: its recorded round hash, round number, and lineage
+    // must match the round it claims to answer, and its responses must still validate against
+    // that round's result. Catches a stale/swapped/edited sidecar before its findings are reused.
+    const roundHash = await sha256OfFile(path);
+    if (responses.round_sha256 !== roundHash)
+      throw new UsageError("--prior-log sidecar round_sha256 does not match its round (stale or mismatched sidecar)");
+    if (responses.round !== priorNum || responses.lineageId !== lineageId)
+      throw new UsageError(`--prior-log sidecar identity (round ${responses.round}/${responses.lineageId}) does not match round ${priorNum}/${lineageId}`);
+    const recheck = validateResponses(responses.responses, prior.result);
+    if (!recheck.ok) throw new UsageError(`--prior-log sidecar fails revalidation against its round: ${recheck.errors}`);
     return {
       lineageId, round: priorNum + 1,
-      parentRoundSha256: await sha256OfFile(path),
+      parentRoundSha256: roundHash,
       parentResponsesSha256: await sha256OfFile(sidecar),
       priorFindings: prior.result.findings,
       priorResponses: responses.responses
@@ -2210,7 +2389,7 @@ export async function selectLineage(args: {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/core/lineage.test.ts`
-Expected: PASS (8 tests).
+Expected: PASS (9 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2229,7 +2408,7 @@ git commit -m "feat: lineage selection, continuity, and parent-hash pinning"
 
 **Interfaces:**
 - Consumes: `RoundArtifact`, `readRound`, `listRounds`, `validateStructural`, `validateSemantic`, `computeVerdict`, `sha256OfFile`, `UsageError`.
-- Produces: `export async function verifyApproval(args: { approvalPath?: string; priorPath: string; priorReviewDir: string }): Promise<{ approvalSha256: string }>` — locates the artifact (explicit path, else latest approved round under `priorReviewDir`), validates structure, re-runs `within_result` semantics, recomputes the verdict and requires both recomputed and stored to be `approved`, requires `stage==="spec"` and `document_sha256 === sha256(priorPath)`; returns the artifact's sha256.
+- Produces: `export async function verifyApproval(args: { approvalPath?: string; priorPath: string; priorReviewDir: string }): Promise<{ approvalSha256: string }>` — locates the artifact (explicit `--prior-approval` path, else **deterministic** auto-locate: approved `stage:spec` rounds whose `document_sha256 === sha256(priorPath)`, highest round within a lineage; **>1 qualifying lineage → error, require `--prior-approval`**), validates the full envelope (via `readRound`), re-runs `within_result` semantics, recomputes the verdict and requires both recomputed and stored to be `approved`, requires `stage==="spec"` and `document_sha256 === sha256(priorPath)`; returns the artifact's sha256.
 
 - [ ] **Step 1: Write the failing test `test/core/approval.test.ts`**
 
@@ -2291,6 +2470,13 @@ describe("verifyApproval", () => {
     writeRoundOnce(specDir, "L1", 1, art({ document_sha256: sha256("# spec\n"), verdict: "changes_requested" }));
     await expect(verifyApproval({ priorPath: specPath, priorReviewDir: specDir })).rejects.toThrow(UsageError);
   });
+  it("errors when >1 lineage qualifies (ambiguous) but accepts an explicit --prior-approval", async () => {
+    const a = writeRoundOnce(specDir, "L1", 1, art({ document_sha256: sha256("# spec\n") }));
+    writeRoundOnce(specDir, "L2", 1, art({ lineageId: "L2", document_sha256: sha256("# spec\n") }));
+    await expect(verifyApproval({ priorPath: specPath, priorReviewDir: specDir })).rejects.toThrow(UsageError);
+    const out = await verifyApproval({ approvalPath: a, priorPath: specPath, priorReviewDir: specDir });
+    expect(out.approvalSha256).toMatch(/^[0-9a-f]{64}$/);
+  });
 });
 ```
 
@@ -2311,28 +2497,40 @@ import { validateSemantic } from "./semantics.js";
 import { computeVerdict } from "./verdict.js";
 import { sha256OfFile } from "./hash.js";
 
-function findLatestApproved(reviewDir: string): string | undefined {
-  if (!existsSync(reviewDir)) return undefined;
-  const candidates: Array<{ path: string; round: number }> = [];
+// Deterministic auto-locate (spec §6 step 0): only approved stage:spec rounds whose
+// document_sha256 matches --prior; highest round WITHIN a lineage; >1 qualifying lineage is
+// ambiguous (require --prior-approval) rather than picking by round number across lineages.
+function findApprovedFor(reviewDir: string, priorHash: string): string {
+  if (!existsSync(reviewDir)) throw new UsageError(`No review dir for --prior approval: ${reviewDir}`);
+  const perLineage: Array<{ path: string; round: number }> = [];
   for (const lineage of readdirSync(reviewDir)) {
     const lineageDir = join(reviewDir, lineage);
+    let best: { path: string; round: number } | undefined;
     for (const n of listRounds(lineageDir)) {
       const path = join(lineageDir, `round-${n}.json`);
-      try { if (readRound(path).verdict === "approved") candidates.push({ path, round: n }); } catch { /* skip */ }
+      let art: RoundArtifact;
+      try { art = readRound(path); } catch { continue; }   // skip malformed/unreadable — never trusted
+      if (art.verdict !== "approved" || art.stage !== "spec" || art.document_sha256 !== priorHash) continue;
+      if (!best || n > best.round) best = { path, round: n };
     }
+    if (best) perLineage.push(best);
   }
-  candidates.sort((a, b) => b.round - a.round);
-  return candidates[0]?.path;
+  if (perLineage.length === 0)
+    throw new UsageError(`No approved spec round matching --prior found under ${reviewDir}`);
+  if (perLineage.length > 1)
+    throw new UsageError(`Ambiguous approval: ${perLineage.length} lineages have an approved round for --prior; pass --prior-approval to choose one`);
+  return perLineage[0].path;
 }
 
 export async function verifyApproval(args: {
   approvalPath?: string; priorPath: string; priorReviewDir: string;
 }): Promise<{ approvalSha256: string }> {
-  const path = args.approvalPath ?? findLatestApproved(args.priorReviewDir);
-  if (!path) throw new UsageError(`No approved spec round found under ${args.priorReviewDir}`);
+  const priorHash = await sha256OfFile(args.priorPath);
+  const path = args.approvalPath ?? findApprovedFor(args.priorReviewDir, priorHash);
 
+  // readRound validates the full envelope (schema §6); a malformed artifact throws here.
   let artifact: RoundArtifact;
-  try { artifact = readRound(path); } catch { throw new UsageError(`Cannot read approval artifact: ${path}`); }
+  try { artifact = readRound(path); } catch (err) { throw new UsageError(`Cannot read approval artifact: ${path} (${(err as Error).message})`); }
 
   const structural = validateStructural(artifact.result);
   if (!structural.ok) throw new UsageError(`Approval artifact result is malformed: ${structural.errors}`);
@@ -2349,7 +2547,7 @@ export async function verifyApproval(args: {
 
   if (artifact.stage !== "spec") throw new UsageError(`Approval artifact stage is ${artifact.stage}, expected spec`);
 
-  const priorHash = await sha256OfFile(args.priorPath);
+  // priorHash computed above; an explicit --prior-approval is re-checked here too.
   if (artifact.document_sha256 !== priorHash)
     throw new UsageError("Approval artifact document hash does not match --prior");
 
@@ -2360,7 +2558,7 @@ export async function verifyApproval(args: {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/core/approval.test.ts`
-Expected: PASS (4 tests).
+Expected: PASS (5 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2667,7 +2865,7 @@ git commit -m "feat: reviewDocument orchestrator + public barrel"
 - Test: `test/cli/cli.test.ts`
 
 **Interfaces:**
-- Consumes: `reviewDocument`, `selectProvider`, `runCompare`, `finalizeResponses`, `UsageError`, `ValidationError`, core types.
+- Consumes: `reviewDocument`, `selectProvider`, `runCompare`, `finalizeResponses`, `assertCrossModel`, `verifyApproval`, `UsageError`, `ValidationError`, core types.
 - Produces:
   - `export interface CliIO { stdout: (s: string) => void; stderr: (s: string) => void }`.
   - `export async function main(argv: string[], env: Record<string, string | undefined>, io: CliIO, deps?: { now?: () => string; mintLineageId?: () => string; makeProvider?: typeof selectProvider }): Promise<number>` — returns the exit code. `deps` is injected in tests to supply a mock provider and deterministic clock; production defaults use the real clock and `selectProvider`.
@@ -2741,6 +2939,25 @@ describe("cli review", () => {
     expect(code).toBe(2);
     expect(o.err.join("")).toMatch(/stage/i);
   });
+  it("exits 2 when author identity is omitted without --allow-same-model (guard not silently defeated)", async () => {
+    const o = io();
+    const code = await main(
+      [doc, "--stage", "spec", "--criteria", crit, "--reviewer-provider", "openai", "--reviewer-model", "gpt",
+       "--out", join(dir, "out")],
+      { OPENAI_API_KEY: "k" }, o, deps(approved)
+    );
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/author/i);
+  });
+  it("exits 2 when a --compare target equals the author (per-target cross-model guard)", async () => {
+    const o = io();
+    const code = await main(
+      [doc, "--stage", "spec", "--criteria", crit, "--reviewer-provider", "openai", "--reviewer-model", "gpt",
+       "--author-provider", "openai", "--author-model", "gpt", "--compare", "openai:gpt", "--out", join(dir, "out")],
+      { OPENAI_API_KEY: "k" }, o, deps(approved)
+    );
+    expect(code).toBe(2);
+  });
 });
 
 describe("cli respond", () => {
@@ -2778,6 +2995,8 @@ import { reviewDocument } from "../core/index.js";
 import { selectProvider } from "../core/providers/registry.js";
 import { finalizeResponses } from "../core/responses.js";
 import { runCompare } from "../core/compare.js";
+import { assertCrossModel } from "../core/identity.js";
+import { verifyApproval } from "../core/approval.js";
 import { UsageError, ValidationError } from "../core/errors.js";
 import type { AuthorResponse, Stage } from "../core/types.js";
 import type { SemanticContext } from "../core/semantics.js";
@@ -2823,26 +3042,52 @@ export async function main(
     const reviewerProviderName = values["reviewer-provider"] ?? env.REVIEWER_PROVIDER;
     if (!reviewerProviderName || !reviewerModel) throw new UsageError("reviewer provider/model required");
 
+    const allowSameModel = !!values["allow-same-model"];
+    const authorProvider = values["author-provider"] ?? env.AUTHOR_PROVIDER;
+    const authorModel = values["author-model"] ?? env.AUTHOR_MODEL;
+    // Author identity is REQUIRED unless explicitly waived: a missing identity must not slip
+    // through the cross-model guard as an empty string that can never equal the reviewer.
+    if (!allowSameModel && (!authorProvider || !authorModel))
+      throw new UsageError("author provider/model required (set --author-provider/--author-model, or pass --allow-same-model)");
+    const author = { provider: authorProvider ?? "", model: authorModel ?? "" };
+
     if (values.compare) {
       const specs = values.compare.split(",").map(s => {
         const [provider, model] = s.split(":");
         if (!provider || !model) throw new UsageError(`bad --compare entry: ${s}`);
+        assertCrossModel(author, { provider, model }, allowSameModel);   // guard EACH compare target
         return { provider: makeProvider({ provider, model }, env), model };
       });
       const docText = await readFile(docPath, "utf8");
       const criteriaText = await readFile(criteriaPath, "utf8");
-      const { parseCriteria } = await import("../core/criteria.js");
+      const { parseCriteria, parseRequirements } = await import("../core/criteria.js");
       const { buildSystemPrompt, buildUserPrompt } = await import("../core/prompt.js");
       const { renderLineNumbered, lineCount } = await import("../core/render.js");
       const { ids, meta } = parseCriteria(criteriaText);
+
+      // Compare runs the SAME review contract as a normal run (criteria + plan prior/[REQ-*] +
+      // upstream-approval verification + line-numbered context). It is diagnostic only: it does
+      // NOT persist an approvable round and cannot be consumed as --prior-log/--prior-approval.
+      let requirementIds: string[] = [];
+      let priorRendered: string | undefined;
+      let priorSpecPath: string | undefined;
+      const inputLineCounts: Record<string, number> = { [docPath]: lineCount(docText) };
+      if (stage === "plan") {
+        priorSpecPath = req(values.prior, "--prior");
+        const priorText = await readFile(priorSpecPath, "utf8");
+        requirementIds = parseRequirements(priorText);
+        priorRendered = renderLineNumbered(priorText);
+        inputLineCounts[priorSpecPath] = lineCount(priorText);
+        await verifyApproval({ approvalPath: values["prior-approval"], priorPath: priorSpecPath, priorReviewDir: `${priorSpecPath}.review` });
+      }
       const ctx: SemanticContext = {
-        stage, mode: "full", criteriaMeta: meta, requirementIds: [], priorFindings: [],
-        inputLineCounts: { [docPath]: lineCount(docText) }
+        stage, mode: "full", criteriaMeta: meta, requirementIds, priorFindings: [], inputLineCounts
       };
       const out = await runCompare({
         entries: specs, system: buildSystemPrompt(stage),
         user: buildUserPrompt({ documentPath: docPath, documentRendered: renderLineNumbered(docText),
-          criteriaMarkdown: criteriaText, expectedCriterionIds: ids, expectedRequirementIds: [] }),
+          criteriaMarkdown: criteriaText, expectedCriterionIds: ids, expectedRequirementIds: requirementIds,
+          priorSpecPath, priorSpecRendered: priorRendered }),
         ctx, criteriaMeta: meta, now
       });
       io.stdout(JSON.stringify(out.entries, null, 2) + "\n");
@@ -2850,15 +3095,13 @@ export async function main(
     }
 
     const reviewerProvider = makeProvider({ provider: reviewerProviderName, model: reviewerModel }, env);
-    const authorProvider = values["author-provider"] ?? env.AUTHOR_PROVIDER ?? "";
-    const authorModel = values["author-model"] ?? env.AUTHOR_MODEL ?? "";
     const out = await reviewDocument({
       docPath, stage, criteriaPath,
       priorPath: values.prior, priorApprovalPath: values["prior-approval"], priorLogPath: values["prior-log"],
       newLineage: !!values["new-lineage"],
       reviewer: { provider: reviewerProvider, model: reviewerModel },
       reviewerIdentity: { provider: reviewerProviderName, model: reviewerModel },
-      author: { provider: authorProvider, model: authorModel }, allowSameModel: !!values["allow-same-model"],
+      author, allowSameModel,
       outDir: values.out, now, mintLineageId
     });
     io.stdout(JSON.stringify({ verdict: out.verdict, result: out.result }, null, 2) + "\n");
@@ -2986,12 +3229,17 @@ Use when iterating a spec or plan document through independent cross-model revie
 
 ## Advancing spec -> plan
 
+`[REQ-*]` requirement tags are written into the spec **while authoring it**, BEFORE it is
+reviewed and approved — they are part of the spec text, so `document_sha256` covers them.
+Never add or edit `[REQ-*]` tags after approval: that changes the spec hash and invalidates
+the approval the plan stage verifies (`document_sha256 == sha256(--prior)`).
+
 Only after the user signs off on the spec:
 
-- Add `[REQ-*]` requirement tags to the approved spec (each binding requirement).
-- Review the plan against it:
+- Review the plan against the already-tagged, approved spec:
   `review-doc <plan.md> --stage plan --criteria <plan-criteria.md> --prior <spec.md> --reviewer-provider <p> --reviewer-model <m> --author-provider <ap> --author-model <am> --new-lineage`
-  (the CLI auto-locates the spec's approved round under `<spec.md>.review/` and verifies it).
+  (the CLI deterministically locates the spec's approved round under `<spec.md>.review/` and
+  recompute-verifies it; if more than one lineage qualifies, pass `--prior-approval <round.json>`).
 
 ## Limitation
 
@@ -3023,4 +3271,6 @@ git commit -m "feat: review-loop workflow skill + example criteria"
 
 **Placeholder scan:** the only intentional throwaway is the `declarations` stub in Task 5, explicitly removed in Task 5 Step 4, and the adapter stubs in Task 10, explicitly replaced in Tasks 11–12. No "TBD"/"handle edge cases"/"similar to" placeholders.
 
-**Type consistency:** `validateSemantic(result, ctx)` and `SemanticContext` (Tasks 7/8) are consumed unchanged in 13/17/18/19. `RoundArtifact` (Task 14) is consumed by 15/16/17/19. `selectLineage` return shape (`parentRoundSha256`/`parentResponsesSha256`/`priorFindings`/`priorResponses`) matches its use in Task 19. `runReview`/`RunReviewArgs` (Task 13) match 18/19. `finalizeResponses(roundPath, responses)` (Task 15) matches 16/20. `selectProvider(spec, env)` (Task 10) matches 19/20.
+**Type consistency:** `validateSemantic(result, ctx)` and `SemanticContext` (Tasks 7/8) are consumed unchanged in 13/17/18/19. `RoundArtifact` (Task 14) is consumed by 15/16/17/19. `selectLineage` return shape (`parentRoundSha256`/`parentResponsesSha256`/`priorFindings`/`priorResponses`) matches its use in Task 19. `runReview`/`RunReviewArgs` (Task 13) match 18/19. `finalizeResponses(roundPath, responses)` (Task 15) matches 16/20. `selectProvider(spec, env)` (Task 10) matches 19/20. `validateRoundArtifact`/`validateResponsesArtifact` (Task 2) are consumed by `readRound` (14) / `readResponses` (15); the `RESPONSES_ARTIFACT_SCHEMA` `response` enum mirrors the `AuthorResponse` union (Task 1). `assertCrossModel` (Task 10) and `verifyApproval` (Task 17) are consumed by the CLI (Task 20) for the author-identity guard and the compare-mode preflight.
+
+**Integrity-fix coverage (this revision):** envelope validation on read (Tasks 2/14/15); sidecar re-bind on consume (Task 16); deterministic, ambiguity-failing approval selection (Task 17); author identity required + per-`--compare`-target cross-model guard + compare runs the full review contract (Task 20); `[REQ-*]` manifest authored before approval + requirement→task table (spec §7 + this plan's coverage table). These bring the plan in line with spec §6/§7 (which already mandated the checks) and close the implementation-soundness findings.
