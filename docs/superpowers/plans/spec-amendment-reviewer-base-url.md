@@ -66,5 +66,14 @@ Semantics:
 - §9 backlog: add "looser JSON mode / per-endpoint reviewer fallback" as deferred.
 - Bump spec status (e.g. v12) and re-approve.
 
-Until approved, Phase 1 implements the flag as specified here and treats this document as the
-authority; the approved spec text is untouched.
+## Sequencing (binding)
+
+**Phase 1 cannot begin until this amendment is approved and incorporated into a newly approved
+spec version (v12).** The order is strict:
+
+1. Review this amendment.
+2. Incorporate the edits above into the spec and re-approve as **v12**.
+3. **Then** execute Phase 1 against the v12 spec.
+
+`--reviewer-base-url` must **not** be implemented ahead of that approval. The approved spec text
+is not edited until step 2.

@@ -19,9 +19,10 @@ findings + responses and verifies continuity. The approval state becomes reprodu
 
 - Hashing (`sha256`, `sha256OfFile`).
 - The **remaining** semantic checks: provenance (`still_present`/`resolved`/`superseded` ids ∈
-  `priorFindings`; `new` ids don't collide), carry-forward completeness (every prior active
-  finding reappears once with terminal status), supersede linkage, and the `mode`-gated split
-  (`within_result` vs `full`).
+  `priorFindings`; `new` ids don't collide), carry-forward completeness (every prior **active**
+  finding reappears exactly once, with an **allowed next status: `still_present` | `resolved` |
+  `superseded`** — note `still_present` is *not* terminal; only `resolved`/`superseded` are
+  terminal), supersede linkage, and the `mode`-gated split (`within_result` vs `full`).
 - Write-once round artifacts + the `writeRoundOnce` fail-closed validation (schema +
   round/lineageId match) + envelope schemas (`ROUND_ARTIFACT_SCHEMA`,
   `RESPONSES_ARTIFACT_SCHEMA`) deferred from Phase-1 Task 2.
@@ -30,8 +31,9 @@ findings + responses and verifies continuity. The approval state becomes reprodu
 - Lineage selection & continuity: `--prior-log` latest-round + stage/criteria/prior checks,
   sidecar re-bind, **immediate parent-pair** re-verification against on-disk `round-(N-1)` files,
   `--new-lineage`, bootstrap.
-- `reviewDocument` **persisting path** (extends the Phase-1 stateless orchestrator to write the
-  immutable `round-N.json` and return `roundPath`).
+- A **new** `reviewDocument` export that **calls** Phase-1's frozen `reviewOnce` and layers the
+  persisting path on top (writes the immutable `round-N.json`, returns `roundPath`). `reviewOnce`
+  is not modified.
 - CLI remainder: `respond` (`--responses <file>`, rejects `--out` and stdin `-`), `--prior-log`,
   `--new-lineage`, `--out`.
 
@@ -50,7 +52,7 @@ findings + responses and verifies continuity. The approval state becomes reprodu
 | 14 Persistence | full | Write-once + `writeRoundOnce` fail-closed validation + `readRound` envelope validation. |
 | 15 Author responses | full | `validateResponses` + finalize-once sidecar + `readResponses`. |
 | 16 Lineage selection & continuity | full | latest-round/continuity + sidecar re-bind + immediate parent-pair re-verification + bootstrap. |
-| 19 (remainder) | partial | Extend the Phase-1 stateless `reviewDocument` with `selectLineage` + `writeRoundOnce`; return `{verdict, result, roundPath}`. (Plan-stage `verifyApproval` stays out — Phase 3.) |
+| 19 (remainder) | partial | Add a **new** `reviewDocument` that calls the frozen `reviewOnce` (Phase 1) and adds `selectLineage` + `writeRoundOnce`; returns `{verdict, result, roundPath}`. Do **not** edit `reviewOnce`. (Plan-stage `verifyApproval` stays out — Phase 3.) |
 | 20 (remainder) | partial | Add `respond` subcommand + `--prior-log`, `--new-lineage`, `--out`. (`--prior`/`--prior-approval` stay out — Phase 3.) |
 
 ## Preconditions
@@ -58,7 +60,7 @@ findings + responses and verifies continuity. The approval state becomes reprodu
 - **Phase 1 complete** (empirical gate passed; stateless reviewer + full schema + Phase-1
   semantic checks shipped).
 - Phase-1 interfaces available: `ReviewResult`/`REVIEW_SCHEMA`/`validateStructural`,
-  `validateSemantic`+`SemanticContext`, `runReview`, `computeVerdict`, stateless `reviewDocument`,
+  `validateSemantic`+`SemanticContext`, `runReview`, `computeVerdict`, stateless `reviewOnce`,
   provider/registry/identity.
 
 ## Interface handed to Phase 3

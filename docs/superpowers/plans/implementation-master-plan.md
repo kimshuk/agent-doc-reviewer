@@ -24,16 +24,29 @@ build the durable-artifact and approval machinery on top of it.
 | 2 | `phase-2-iteration-and-artifacts.md` | Immutable rounds, finalized responses, lineage continuity (spec stage) | All Phase-2 tests + build green; end-to-end spec review→respond→re-run→approved lineage works |
 | 3 | `phase-3-plan-stage-and-skill.md` | Plan-stage upstream review + approval gating + Anthropic adapter + `review-loop` skill | Full v1 per approved spec; all 21 tasks complete; REQ matrix all `complete` |
 
-Each phase produces working, testable software on its own. A later phase never edits a
-prior phase's shipped contract — it extends it through the interfaces named in each phase doc.
+Each phase produces working, testable software on its own.
+
+**Contract-extension rule (no edits to a shipped contract).** A later phase never changes the
+signature or return type of a function a prior phase shipped — it adds *new* exports that wrap
+the old ones. Concretely: Phase 1 ships the stateless **`reviewOnce({...}) → {verdict, result}`**;
+Phase 2 adds a *separate* **`reviewDocument({...}) → {verdict, result, roundPath}`** that calls
+`reviewOnce` and layers persistence on top. `reviewOnce` is frozen at Phase 1. The same rule
+governs `validateSemantic`, which Phase 2 extends via `mode`/`priorFindings`-gated checks without
+changing its signature. "Compatible extension via new wrappers," never "edit in place."
+
+> **Sequencing gate (amendment first).** Phase 1 depends on `--reviewer-base-url`, which is not
+> in the approved spec. Phase 1 **cannot begin** until `spec-amendment-reviewer-base-url.md` is
+> approved and incorporated into a newly approved **spec v12**. Order: amendment review → spec
+> v12 → Phase 1 execution.
 
 ## Companion documents
 
 - `phase-requirement-matrix.md` — every approved `[REQ-*]` × phase, marked
-  `partial`/`complete`/`deferred`. This is the authoritative coverage map.
+  `partial`/`complete`/`deferred`, with a **Final cumulative status** column. This is the
+  authoritative coverage map.
 - `spec-amendment-reviewer-base-url.md` — the **minimal proposed amendment** adding the
-  `--reviewer-base-url` CLI option (Disposition A). The approved spec is **not** edited
-  until that amendment is itself approved.
+  `--reviewer-base-url` CLI option (Disposition A). The approved spec is **not** edited until
+  that amendment is approved and folded into **spec v12**, which is a precondition for Phase 1.
 
 ## Requirement coverage (all approved `[REQ-*]`, exactly)
 
