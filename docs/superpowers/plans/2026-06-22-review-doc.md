@@ -1909,7 +1909,7 @@ git commit -m "feat: runReview — validate, one repair retry, then verdict"
 - Consumes: `Identity`, `CriteriaMeta`, `ReviewResult`, `Verdict`, `Stage`, `UsageError`, `validateRoundArtifact`.
 - Produces:
   - `export interface RoundArtifact { schemaVersion: 1; round: number; lineageId: string; timestamp: string; stage: Stage; author: Identity; reviewer: Identity; document_sha256: string; criteria_sha256: string; prior_document_sha256: string | null; parent_round_sha256: string | null; parent_responses_sha256: string | null; prior_approval_sha256: string | null; criteriaMeta: CriteriaMeta; requirementIds: string[]; verdict: Verdict; result: ReviewResult }`.
-  - `export function writeRoundOnce(reviewDir: string, lineageId: string, round: number, artifact: RoundArtifact): string` — creates `<reviewDir>/<lineageId>/round-<round>.json`; throws `UsageError` if it already exists; returns the path.
+  - `export function writeRoundOnce(reviewDir: string, lineageId: string, round: number, artifact: RoundArtifact): string` — **validates the artifact** (`validateRoundArtifact`) and that `artifact.round`/`artifact.lineageId` match the write target before persisting; creates `<reviewDir>/<lineageId>/round-<round>.json`; throws `UsageError` if malformed, mislabeled, or already present; returns the path.
   - `export function readRound(path: string): RoundArtifact` — parses **and validates** the full envelope via `validateRoundArtifact`; throws `UsageError` on bad JSON or a malformed/stale envelope (so no consumer ever trusts an unvalidated cast).
   - `export function listRounds(lineageDir: string): number[]` — sorted ascending; `[]` if the dir is absent.
 
@@ -1963,6 +1963,14 @@ describe("persistence", () => {
     await writeFile(p.replace(/round-1\.json$/, "round-8.json"), "not json");
     expect(() => readRound(p.replace(/round-1\.json$/, "round-8.json"))).toThrow(UsageError);
   });
+  it("refuses to write a malformed artifact (P2 fail-closed)", () => {
+    const bad = { ...artifact(1), verdict: "nope" } as any;
+    expect(() => writeRoundOnce(dir, "L1", 1, bad)).toThrow(UsageError);
+  });
+  it("refuses to write an artifact whose round/lineageId does not match the target (P2)", () => {
+    expect(() => writeRoundOnce(dir, "L1", 1, artifact(2))).toThrow(UsageError);        // round 2 artifact at round 1
+    expect(() => writeRoundOnce(dir, "OTHER", 1, artifact(1))).toThrow(UsageError);     // lineageId mismatch
+  });
 });
 ```
 
@@ -1990,6 +1998,11 @@ export interface RoundArtifact {
 }
 
 export function writeRoundOnce(reviewDir: string, lineageId: string, round: number, artifact: RoundArtifact): string {
+  // Fail closed: never persist a malformed or mislabeled write-once artifact (P2 hardening).
+  const v = validateRoundArtifact(artifact);
+  if (!v.ok) throw new UsageError(`Refusing to write a malformed round artifact: ${v.errors}`);
+  if (artifact.round !== round || artifact.lineageId !== lineageId)
+    throw new UsageError(`Round artifact identity (${artifact.lineageId}/round-${artifact.round}) does not match write target (${lineageId}/round-${round})`);
   const dir = join(reviewDir, lineageId);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `round-${round}.json`);
@@ -2020,7 +2033,7 @@ export function listRounds(lineageDir: string): number[] {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/core/persistence.test.ts`
-Expected: PASS (4 tests).
+Expected: PASS (6 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2951,6 +2964,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { main, type CliIO } from "../../src/cli/index.js";
 import type { ReviewerProvider, ReviewResult } from "../../src/core/types.js";
 import { mkdtemp, writeFile, readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -3119,6 +3133,26 @@ describe("cli respond", () => {
     expect(code).toBe(2);
     expect(o.err.join("")).toMatch(/stdin|file path/i);
   });
+  it("rejects --out on respond (exit 2, no sidecar written)", async () => {
+    // produce a real round to point at
+    const o0 = io();
+    await main(
+      [doc, "--stage", "spec", "--criteria", crit, "--reviewer-provider", "openai", "--reviewer-model", "gpt",
+       "--author-provider", "anthropic", "--author-model", "claude", "--out", join(dir, "out")],
+      { OPENAI_API_KEY: "k" }, o0, deps(changes)
+    );
+    const roundPath = join(dir, "out", "L1", "round-1.json");
+    const respFile = join(dir, "resp.json");
+    await writeFile(respFile, JSON.stringify([{ findingId: "F1", response: "accepted_and_revised" }]));
+    const o = io();
+    const code = await main(
+      ["respond", "--round", roundPath, "--responses", respFile, "--out", join(dir, "elsewhere")],
+      {}, o, deps(approved)
+    );
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/--out/);
+    expect(existsSync(roundPath.replace(/\.json$/, ".responses.json"))).toBe(false);
+  });
 });
 ```
 
@@ -3167,10 +3201,13 @@ export async function main(
     const { values, positionals } = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true });
 
     if (positionals[0] === "respond") {
+      // v1 contract: the sidecar is fixed beside its round, so respond takes NO --out — reject
+      // it loudly rather than accept-and-ignore (which would mislead the caller).
+      if (values.out !== undefined)
+        throw new UsageError("--out is not supported by respond (the sidecar is fixed beside its round)");
       const roundPath = req(values.round, "--round");
       const respFile = req(values.responses, "--responses");
-      // v1 contract: --responses is a FILE only (no stdin). The sidecar is fixed beside its
-      // round, so --out does not apply here (it is ignored if present).
+      // --responses is a FILE only (no stdin) in v1.
       if (respFile === "-")
         throw new UsageError("reading --responses from stdin (-) is not supported in v1; pass a file path");
       const responses = JSON.parse(await readFile(respFile, "utf8")) as AuthorResponse[];
@@ -3278,7 +3315,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run test/cli/cli.test.ts`
-Expected: PASS (11 tests).
+Expected: PASS (12 tests).
 
 - [ ] **Step 5: Build to confirm the binary compiles**
 
@@ -3425,4 +3462,6 @@ git commit -m "feat: review-loop workflow skill + example criteria"
 
 **Integrity-fix coverage (v9):** envelope validation on read (Tasks 2/14/15); sidecar re-bind on consume (Task 16); deterministic, ambiguity-failing approval selection (Task 17); author identity required + per-`--compare`-target cross-model guard + compare runs the full review contract (Task 20); `[REQ-*]` manifest authored before approval + requirement→task table (spec §7 + this plan's coverage table).
 
-**Integrity-fix coverage (v10, second pass):** author provider+model **always** required — `--allow-same-model` waives only the equality check (Task 20); compare is a **stateless fresh-only** diagnostic — `--prior-log` + `--compare` is an error, nothing is persisted, stdout carries `{ entries, failures }`, with a plan-stage compare integration test (Tasks 18/20); core temp-file naming uses `crypto.randomUUID`, **not** `process.pid`, keeping core free of `process` (REQ-CORE, Task 15); the selected round's **immediate parent pair** is re-verified against on-disk `round-(N-1)` files (Task 16); non-null sha256 envelope fields are format-checked `^[0-9a-f]{64}$` (Task 2). **Integrity-fix coverage (v11, third pass):** `respond` is `--responses <file>` only — stdin (`-`) rejected with a clear error, `--out` does not apply (sidecar fixed beside its round), CLI/test/skill aligned (Task 20); round-envelope **parent-hash invariant** via schema `if/then/else` (round 1 ⇒ both parent hashes null; round > 1 ⇒ both non-null; never one alone) so a later round cannot null its parents to skip continuity (Task 2); **non-empty identity** (`provider`/`model` `minLength: 1`) so empty identities are rejected (Task 2). These bring the plan in line with spec §6/§7 (which already mandated the checks) and close the implementation-soundness findings.
+**Integrity-fix coverage (v10, second pass):** author provider+model **always** required — `--allow-same-model` waives only the equality check (Task 20); compare is a **stateless fresh-only** diagnostic — `--prior-log` + `--compare` is an error, nothing is persisted, stdout carries `{ entries, failures }`, with a plan-stage compare integration test (Tasks 18/20); core temp-file naming uses `crypto.randomUUID`, **not** `process.pid`, keeping core free of `process` (REQ-CORE, Task 15); the selected round's **immediate parent pair** is re-verified against on-disk `round-(N-1)` files (Task 16); non-null sha256 envelope fields are format-checked `^[0-9a-f]{64}$` (Task 2). **Integrity-fix coverage (v11, third pass):** `respond` is `--responses <file>` only — stdin (`-`) rejected with a clear error, `--out` does not apply (sidecar fixed beside its round), CLI/test/skill aligned (Task 20); round-envelope **parent-hash invariant** via schema `if/then/else` (round 1 ⇒ both parent hashes null; round > 1 ⇒ both non-null; never one alone) so a later round cannot null its parents to skip continuity (Task 2); **non-empty identity** (`provider`/`model` `minLength: 1`) so empty identities are rejected (Task 2).
+
+**Final pass:** `respond` rejects `--out` (exit 2, no sidecar written) rather than accept-and-ignore (P1, Task 20); `writeRoundOnce` validates the artifact and that its `round`/`lineageId` match the write target before persisting, so a malformed or mislabeled write-once artifact can never be created (P2 hardening, Task 14). These bring the plan in line with spec §6/§7 (which already mandated the checks) and close the implementation-soundness findings.
