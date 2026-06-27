@@ -1,10 +1,11 @@
 # Proposed Spec Amendment — `--reviewer-base-url` (reviewer swappability)
 
-> **Status:** PROPOSED. Not yet merged into the approved spec. The approved spec
-> `docs/superpowers/specs/2026-06-22-review-doc-design.md` (v11) is **not** edited until this
-> amendment is reviewed and approved. This document exists because Disposition A introduces a
-> CLI option that is **not** in the approved spec, and "기존 승인 spec을 조용히 수정하지
-> 않는다" — the approved spec must not be silently changed.
+> **Status:** ✅ APPROVED & INCORPORATED into spec **v12**
+> (`docs/superpowers/specs/2026-06-22-review-doc-design.md`). All "Required spec edits if
+> approved" below have been applied (§3 CLI surface, §3 Keys & env, §5 adapters, §9 backlog,
+> status → v12). Phase 1 is now unblocked. This document is retained as the amendment record.
+> (Originally PROPOSED against v11 — the approved spec was not silently changed; per Disposition A
+> this CLI option was reviewed and approved before merging.)
 
 ## Motivation
 

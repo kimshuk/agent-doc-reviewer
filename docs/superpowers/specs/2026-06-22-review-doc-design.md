@@ -1,7 +1,12 @@
 # Design Spec: `review-doc` — cross-model document reviewer
 
 **Date:** 2026-06-22
-**Status:** v11 — frozen v1 scope; third soundness pass: `respond` is `--responses <file>` only (no `--out`, no stdin in v1); round-envelope parent-hash invariant (round 1 ⇒ both null, round > 1 ⇒ both non-null) and non-empty identity enforced in schema. Prior passes: author identity always required, stateless fresh-only compare, immediate parent-pair re-verification, sha256 format-checks. Implementation plan: `docs/superpowers/plans/2026-06-22-review-doc.md`.
+**Status:** v12 — **APPROVED**. Incorporates the `--reviewer-base-url` amendment
+(`docs/superpowers/plans/spec-amendment-reviewer-base-url.md`): reviewer-only OpenAI-compatible
+base URL, CLI-settable with `OPENAI_BASE_URL` env, precedence flag > env > default, constrained to
+strict `json_schema` endpoints (looser-mode/fallback deferred to §9). Edits: §3 CLI surface, §3
+Keys & env, §5 adapters, §9 backlog. This unblocks Phase 1. Prior frozen-v1 scope (v11), third
+soundness pass: `respond` is `--responses <file>` only (no `--out`, no stdin in v1); round-envelope parent-hash invariant (round 1 ⇒ both null, round > 1 ⇒ both non-null) and non-empty identity enforced in schema. Prior passes: author identity always required, stateless fresh-only compare, immediate parent-pair re-verification, sha256 format-checks. Implementation plan: `docs/superpowers/plans/2026-06-22-review-doc.md`.
 
 ## Purpose
 
@@ -205,6 +210,8 @@ review-doc <doc.md> --stage <spec|plan> --criteria <path> [options]
 
   --reviewer-provider  openai | anthropic     (env REVIEWER_PROVIDER)
   --reviewer-model     <id>                   (env REVIEWER_MODEL)
+  --reviewer-base-url <url>  OpenAI-compatible base URL for the reviewer
+                             (default: https://api.openai.com/v1; env OPENAI_BASE_URL)
   --author-provider    <name>                 (env AUTHOR_PROVIDER; ALWAYS REQUIRED)
   --author-model       <id>                   (env AUTHOR_MODEL;     ALWAYS REQUIRED)
   --allow-same-model   waive ONLY the author==reviewer equality rejection; off by default
@@ -262,6 +269,14 @@ with `--compare` is an error, no lineage/round is written, and there is **no
 consumed as `--prior-log`/`--prior-approval`, so it cannot bypass the spec→plan gate.
 
 **Keys & env.** `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`; missing key -> error (exit 2).
+`OPENAI_BASE_URL` sets the OpenAI-compatible reviewer base URL (env form of
+`--reviewer-base-url`). Precedence: `--reviewer-base-url` > `env.OPENAI_BASE_URL` > built-in
+default (`https://api.openai.com/v1`). It applies to the **reviewer** only (there is no author
+HTTP call); with `--compare`, every entry uses the same base URL (per-entry endpoints are not in
+v1). Custom endpoints are supported **only** if OpenAI-compatible at `/chat/completions` and they
+honor strict `response_format: {type:"json_schema", json_schema:{name, strict:true, schema}}`; an
+endpoint that cannot meet this surfaces as a normal provider error (exit 2) — there is no looser
+JSON mode and no per-endpoint fallback (§9).
 
 ---
 
@@ -443,8 +458,11 @@ editorial only; temperature is `0` for every call.
 
 Both return the plain object to core for uniform validation, repair, and verdict. On a
 repair call each adapter renders `priorInvalidOutput` + `validationErrors` into its own
-request shape. The OpenAI adapter is parameterized by `baseURL` (default OpenAI); a future
-GLM / Gemini-compatible provider is **config, not new adapter code**.
+request shape. The OpenAI adapter is parameterized by `baseURL` (default OpenAI) and is
+**CLI-settable** via `--reviewer-base-url` (env `OPENAI_BASE_URL`); it is constrained to
+endpoints that honor strict `json_schema` (§3) — a non-conforming endpoint is a normal provider
+error, not a repairable state. A future GLM / Gemini-compatible provider is **config, not new
+adapter code**.
 
 ---
 
@@ -712,6 +730,10 @@ Runner: `vitest`. Coverage:
 - **Compare-mode persistence** (`round-N.compare.json` with a defined round/lineage/collision
   contract). v1 compare is stdout-only and stateless; persisting it needs a contract that does
   not muddy the approval lineage, so it is deferred.
+- **Looser JSON mode / per-endpoint reviewer fallback** for `--reviewer-base-url` endpoints that
+  do not honor strict `json_schema`. v1 supports only strict-`json_schema` OpenAI-compatible
+  endpoints; a non-conforming endpoint is a hard error (`needs_user_decision`), never a silent
+  fallback.
 
 **v2 integrity hardening backlog (deliberately deferred per the v1 threat model):**
 - Cryptographic **signing** of round artifacts (authenticity vs accidental corruption).
