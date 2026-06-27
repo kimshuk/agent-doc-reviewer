@@ -35,4 +35,10 @@ describe("parseRequirements", () => {
   it("throws on zero requirements", () => {
     expect(() => parseRequirements("no reqs here")).toThrow(UsageError);
   });
+  it("throws on duplicate ids", () => {
+    expect(() => parseRequirements("- [REQ-X] a\n- [REQ-X] b")).toThrow(UsageError);
+  });
+  it("ignores REQ tags in prose, extracts only anchored list items", () => {
+    expect(parseRequirements("REQ-NOPE mentioned in prose\n- [REQ-OK] real")).toEqual(["REQ-OK"]);
+  });
 });
