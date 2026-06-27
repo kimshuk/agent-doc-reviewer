@@ -19,7 +19,7 @@ describe("openai adapter", () => {
     const out = await p.review(req);
     expect(out).toEqual({ findings: [] });
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toContain("/chat/completions");
+    expect(String(fetchMock.mock.calls[0][0])).toBe("https://api.openai.com/v1/chat/completions");
     const sent = JSON.parse((init as any).body);
     expect(sent.temperature).toBe(0);
     expect(sent.response_format.type).toBe("json_schema");
