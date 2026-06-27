@@ -1,0 +1,13 @@
+{
+  "name": "review-doc",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": { "review-doc": "./dist/cli/index.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": { "ajv": "^8.17.1" },
+  "devDependencies": { "typescript": "^5.5.0", "vitest": "^2.0.0", "@types/node": "^20.14.0" }
+}
