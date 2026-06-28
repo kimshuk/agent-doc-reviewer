@@ -99,7 +99,7 @@ export async function main(
       const entries = targets.map(t => ({ provider: makeProvider(t, env2), model: t.model }));
       const out = await runCompare({ entries, system, user, ctx, criteriaMeta, now });
       io.stdout(JSON.stringify({ entries: out.entries, failures: out.failures }));
-      return 0;
+      return out.allSucceeded ? 0 : 2;
     }
 
     const provider = makeProvider({ provider: reviewerProvider, model: reviewerModel }, env2);
