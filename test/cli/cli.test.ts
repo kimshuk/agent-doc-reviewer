@@ -1,9 +1,10 @@
-// Phase-1 CLI scope (9 tests): `review` (stateless) + `compare` only.
-// No `respond`, `--out`, `--prior`, persistence/lineage — those are Phase 2/3.
+// CLI scope: `review` (now persisting via reviewDocument) + `compare` (stateless) + `respond`.
+// Plan stage / --prior / --prior-approval remain Phase 3.
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { main, type CliIO } from "../../src/cli/index.js";
 import type { ReviewerProvider, ReviewResult, ProviderSpec } from "../../src/core/types.js";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -37,6 +38,7 @@ beforeEach(async () => {
 
 const deps = (res: ReviewResult) => ({
   now: () => "2026-06-22T00:00:00Z",
+  mintLineageId: () => "L1",
   makeProvider: () => provider(res)
 });
 
@@ -144,5 +146,90 @@ describe("cli compare", () => {
     );
     expect(code).toBe(2);
     expect(o.err.join("")).toMatch(/prior-log/i);
+  });
+});
+
+const reviewArgs = (extra: string[]) =>
+  [doc, "--stage", "spec", "--criteria", crit, "--reviewer-provider", "openai", "--reviewer-model", "gpt",
+   "--author-provider", "anthropic", "--author-model", "claude", ...extra];
+
+describe("cli review persistence + lineage", () => {
+  it("writes an immutable round-1 artifact under --out", async () => {
+    const o = io();
+    const code = await main(reviewArgs(["--out", join(dir, "out")]), { OPENAI_API_KEY: "k" }, o, deps(approved));
+    expect(code).toBe(0);
+    expect(existsSync(join(dir, "out", "L1", "round-1.json"))).toBe(true);
+  });
+
+  it("refuses a second review without --prior-log/--new-lineage once a round exists", async () => {
+    await main(reviewArgs(["--out", join(dir, "out")]), { OPENAI_API_KEY: "k" }, io(), deps(approved));
+    const o = io();
+    const code = await main(reviewArgs(["--out", join(dir, "out")]), { OPENAI_API_KEY: "k" }, o, deps(approved));
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/prior-log|new-lineage/i);
+  });
+
+  it("drives review -> respond -> re-run with --prior-log (round 2 carries the prior finding)", async () => {
+    // round 1: changes_requested with one active finding F1
+    const c1 = await main(reviewArgs(["--out", join(dir, "out")]), { OPENAI_API_KEY: "k" }, io(), deps(changesFor(doc)));
+    expect(c1).toBe(1);
+    const roundPath = join(dir, "out", "L1", "round-1.json");
+
+    // finalize author responses for F1
+    const respFile = join(dir, "resp.json");
+    await writeFile(respFile, JSON.stringify([{ findingId: "F1", response: "accepted_and_revised" }]));
+    const cr = await main(["respond", "--round", roundPath, "--responses", respFile], {}, io(), deps(approved));
+    expect(cr).toBe(0);
+
+    // round 2 via --prior-log: reviewer now reports F1 resolved (terminal) -> approved
+    const resolved: ReviewResult = {
+      ...approved,
+      findings: [{ id: "F1", status: "resolved", severity: "HIGH", disposition: "required", category: "x",
+        claim: "c", where: { path: doc, startLine: 1, endLine: 1 }, fix: "f", completionCondition: "d",
+        supersededByFindingIds: [] }]
+    };
+    const o = io();
+    const c2 = await main(reviewArgs(["--out", join(dir, "out"), "--prior-log", roundPath]), { OPENAI_API_KEY: "k" }, o, deps(resolved));
+    expect(c2).toBe(0);
+    expect(existsSync(join(dir, "out", "L1", "round-2.json"))).toBe(true);
+    const round2 = JSON.parse(await readFile(join(dir, "out", "L1", "round-2.json"), "utf8"));
+    expect(round2.parent_round_sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(round2.parent_responses_sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe("cli respond", () => {
+  it("finalizes the responses sidecar and exits 0", async () => {
+    await main(reviewArgs(["--out", join(dir, "out")]), { OPENAI_API_KEY: "k" }, io(), deps(changesFor(doc)));
+    const roundPath = join(dir, "out", "L1", "round-1.json");
+    const respFile = join(dir, "resp.json");
+    await writeFile(respFile, JSON.stringify([{ findingId: "F1", response: "accepted_and_revised" }]));
+    const o = io();
+    const code = await main(["respond", "--round", roundPath, "--responses", respFile], {}, o, deps(approved));
+    expect(code).toBe(0);
+    const sidecar = JSON.parse(await readFile(roundPath.replace(/\.json$/, ".responses.json"), "utf8"));
+    expect(sidecar.finalized).toBe(true);
+  });
+
+  it("rejects --responses - (stdin not supported in v1)", async () => {
+    const o = io();
+    const code = await main(["respond", "--round", join(dir, "x", "round-1.json"), "--responses", "-"], {}, o, deps(approved));
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/stdin|file path/i);
+  });
+
+  it("rejects --out on respond (exit 2, no sidecar written)", async () => {
+    await main(reviewArgs(["--out", join(dir, "out")]), { OPENAI_API_KEY: "k" }, io(), deps(changesFor(doc)));
+    const roundPath = join(dir, "out", "L1", "round-1.json");
+    const respFile = join(dir, "resp.json");
+    await writeFile(respFile, JSON.stringify([{ findingId: "F1", response: "accepted_and_revised" }]));
+    const o = io();
+    const code = await main(
+      ["respond", "--round", roundPath, "--responses", respFile, "--out", join(dir, "elsewhere")],
+      {}, o, deps(approved)
+    );
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/--out/);
+    expect(existsSync(roundPath.replace(/\.json$/, ".responses.json"))).toBe(false);
   });
 });
