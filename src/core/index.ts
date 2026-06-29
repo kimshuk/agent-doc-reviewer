@@ -2,11 +2,15 @@ import { readFile } from "node:fs/promises";
 import type {
   Stage, Identity, ReviewerProvider, ReviewResult, Verdict, Finding, AuthorResponse, CriteriaMeta
 } from "./types.js";
+import { sha256 } from "./hash.js";
 import { renderLineNumbered, lineCount } from "./render.js";
 import { parseCriteria } from "./criteria.js";
 import { assertCrossModel } from "./identity.js";
 import { buildSystemPrompt, buildUserPrompt } from "./prompt.js";
 import { runReview } from "./review.js";
+import { selectLineage } from "./lineage.js";
+import { writeRoundOnce, type RoundArtifact } from "./persistence.js";
+import { UsageError } from "./errors.js";
 import type { SemanticContext } from "./semantics.js";
 
 export interface ReviewOnceInput {
@@ -80,10 +84,74 @@ export async function reviewOnce(
   });
 }
 
-// --- Phase-1 public barrel (only what Phase 1 ships) ---
+// ── Phase 2: persisting orchestrator ────────────────────────────────────────
+// Frozen contract (docs/.../phase-2-iteration-and-artifacts.md): the input type fixes Phase 3's
+// plan-stage fields as RESERVED. Phase 2 supports stage:"spec" only and calls the FROZEN reviewOnce;
+// it never edits reviewOnce. Phase 3 activates priorPath/priorApprovalPath/stage:"plan" by adding
+// the plan branch (verifyApproval + requirementIds + prior passthrough) with no signature change.
+export interface ReviewDocumentInput {
+  docPath: string;
+  stage: Stage;                                   // Phase 2 supports "spec" only
+  criteriaPath: string;
+  reviewer: { provider: ReviewerProvider; model: string };
+  reviewerIdentity: Identity;
+  author: Identity;
+  allowSameModel: boolean;
+  priorLogPath?: string;                          // lineage continuation (Phase 2)
+  newLineage: boolean;
+  outDir?: string;
+  // ── reserved for Phase 3 (plan stage); UNSUPPORTED in Phase 2 ──
+  priorPath?: string;                             // approved upstream spec
+  priorApprovalPath?: string;                     // its approval artifact
+  now: () => string;
+  mintLineageId: () => string;
+}
+
+// reviewDocument layers persistence + lineage on top of the frozen reviewOnce: it resolves priors
+// from the lineage and passes them through reviewOnce's already-defined priorFindings/priorResponses
+// fields, then writes the immutable round artifact and returns its path.
+export async function reviewDocument(
+  input: ReviewDocumentInput
+): Promise<{ verdict: Verdict; result: ReviewResult; roundPath: string }> {
+  // Reserved-field guard: reject the Phase-3 plan-stage surface loudly rather than silently ignore it.
+  if (input.stage !== "spec" || input.priorPath !== undefined || input.priorApprovalPath !== undefined)
+    throw new UsageError("plan stage is not supported until Phase 3");
+
+  const criteriaText = await readFile(input.criteriaPath, "utf8");
+  const docText = await readFile(input.docPath, "utf8");
+  const { meta: criteriaMeta } = parseCriteria(criteriaText);
+  const criteriaSha256 = sha256(criteriaText);
+  const reviewDir = input.outDir ?? `${input.docPath}.review`;
+
+  const lineage = await selectLineage({
+    reviewDir, priorLogPath: input.priorLogPath, newLineage: input.newLineage,
+    stage: input.stage, criteriaSha256, priorDocumentSha256: null, mintLineageId: input.mintLineageId
+  });
+
+  // Call the FROZEN reviewOnce (it re-reads doc/criteria + runs assertCrossModel internally).
+  const { verdict, result } = await reviewOnce({
+    docPath: input.docPath, stage: input.stage, criteriaPath: input.criteriaPath,
+    reviewer: input.reviewer, reviewerIdentity: input.reviewerIdentity,
+    author: input.author, allowSameModel: input.allowSameModel,
+    priorFindings: lineage.priorFindings, priorResponses: lineage.priorResponses
+  });
+
+  const artifact: RoundArtifact = {
+    schemaVersion: 1, round: lineage.round, lineageId: lineage.lineageId, timestamp: input.now(),
+    stage: input.stage, author: input.author, reviewer: input.reviewerIdentity,
+    document_sha256: sha256(docText), criteria_sha256: criteriaSha256, prior_document_sha256: null,
+    parent_round_sha256: lineage.parentRoundSha256, parent_responses_sha256: lineage.parentResponsesSha256,
+    prior_approval_sha256: null, criteriaMeta, requirementIds: [], verdict, result
+  };
+  const roundPath = writeRoundOnce(reviewDir, lineage.lineageId, lineage.round, artifact);
+  return { verdict, result, roundPath };
+}
+
+// --- public barrel ---
 export * from "./types.js";
 export { selectProvider } from "./providers/registry.js";
 export { assertCrossModel } from "./identity.js";
 export { parseCriteria, parseRequirements } from "./criteria.js";
 export { runCompare } from "./compare.js";
+export { finalizeResponses, validateResponses, readResponses, sidecarPathFor } from "./responses.js";
 export { UsageError, ValidationError } from "./errors.js";
