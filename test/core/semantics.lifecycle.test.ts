@@ -80,3 +80,54 @@ describe("semantic lifecycle/feasibility/location validation (Phase 1)", () => {
     expect(validateSemantic(r, ctx({ priorFindings: prior })).ok).toBe(true);
   });
 });
+
+describe("semantic Phase-2 lifecycle: provenance, carry-forward, supersede linkage", () => {
+  // provenance: a new id may not collide with a prior id
+  it("fails when a new id collides with a prior id", () => {
+    const prior = [f({ id: "F1" })];
+    expect(validateSemantic(result([f({ id: "F1", status: "new" })], linkF1), ctx({ priorFindings: prior })).ok).toBe(false);
+  });
+
+  // provenance: a carried status must have prior provenance
+  it("fails when a carried status has no prior provenance", () => {
+    expect(validateSemantic(result([f({ id: "F9", status: "still_present" })], { criteriaCoverage: [{ id: "CRIT-A", assessment: "not_met", note: "", findingIds: ["F9"] }] }), ctx()).ok).toBe(false);
+  });
+
+  // carry-forward completeness: a prior active finding may not be dropped
+  it("fails when a prior active finding is dropped", () => {
+    const prior = [f({ id: "F1", status: "new" })];
+    expect(validateSemantic(result([]), ctx({ priorFindings: prior })).ok).toBe(false);
+  });
+
+  // carry-forward completeness: a prior terminal finding may be omitted
+  it("allows omitting a prior terminal finding", () => {
+    const prior = [f({ id: "F1", status: "resolved" })];
+    expect(validateSemantic(result([]), ctx({ priorFindings: prior })).ok).toBe(true);
+  });
+
+  // carry-forward completeness: a prior active finding must reappear with a terminal/still_present status
+  it("allows a prior active finding carried as resolved", () => {
+    const prior = [f({ id: "F1", status: "new" })];
+    expect(validateSemantic(result([f({ id: "F1", status: "resolved" })]), ctx({ priorFindings: prior })).ok).toBe(true);
+  });
+
+  // supersede linkage: a superseded finding requires an active replacement
+  it("fails a superseded finding with no active replacement", () => {
+    const prior = [f({ id: "F1", status: "new", disposition: "required" })];
+    const noRepl = result([f({ id: "F1", status: "superseded", disposition: "required", supersededByFindingIds: [] })]);
+    expect(validateSemantic(noRepl, ctx({ priorFindings: prior })).ok).toBe(false);
+  });
+
+  // supersede linkage: a required superseded finding requires an active required replacement
+  it("passes a superseded finding replaced by an active required finding", () => {
+    const prior = [f({ id: "F1", status: "new", disposition: "required" })];
+    const withRepl = result(
+      [
+        f({ id: "F1", status: "superseded", disposition: "required", supersededByFindingIds: ["F2"] }),
+        f({ id: "F2", status: "new", disposition: "required" }),
+      ],
+      { criteriaCoverage: [{ id: "CRIT-A", assessment: "not_met", note: "", findingIds: ["F2"] }] }
+    );
+    expect(validateSemantic(withRepl, ctx({ priorFindings: prior })).ok).toBe(true);
+  });
+});
