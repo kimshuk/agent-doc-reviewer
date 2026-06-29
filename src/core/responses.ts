@@ -45,6 +45,12 @@ export async function finalizeResponses(roundPath: string, responses: AuthorResp
     round: round.round, lineageId: round.lineageId,
     round_sha256: await sha256OfFile(roundPath), finalized: true, responses
   };
+  // Fail closed (mirror writeRoundOnce): never persist a sidecar that won't pass envelope
+  // validation. validateResponses checks semantics but NOT the response-kind enum, so an
+  // out-of-enum kind would otherwise write a sidecar that readResponses later rejects — leaving
+  // a finalized-but-unreadable sidecar that can never be re-finalized (EEXIST) and bricks the lineage.
+  const env = validateResponsesArtifact(artifact);
+  if (!env.ok) throw new UsageError(`Refusing to write a malformed responses sidecar: ${env.errors}`);
   // Atomic, no-clobber publish: write a temp file, then hard-link it to the sidecar.
   // linkSync throws EEXIST if the sidecar already exists, so an existing file is NEVER overwritten.
   // Unique temp name beside the sidecar (same filesystem, so linkSync won't EXDEV). Uses

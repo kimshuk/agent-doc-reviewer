@@ -34,7 +34,12 @@ export async function selectLineage(args: {
     const lineageDir = dirname(path);
     const lineageId = basename(lineageDir);
     const prior = readRound(path);
-    const priorNum = Number(/^round-(\d+)\.json$/.exec(basename(path))?.[1]);
+    // Trust the validated round number from the artifact, not a regex on the filename (a renamed
+    // file would yield NaN and a misleading error). Require the file to be named for its round so
+    // listRounds / parent-path construction stay coherent.
+    const priorNum = prior.round;
+    if (basename(path) !== `round-${priorNum}.json`)
+      throw new UsageError(`--prior-log must be named round-${priorNum}.json (matching its round field), got ${basename(path)}`);
     const rounds = listRounds(lineageDir);
     const latest = rounds[rounds.length - 1];
     if (priorNum !== latest)

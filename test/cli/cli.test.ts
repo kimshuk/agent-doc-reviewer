@@ -22,6 +22,13 @@ const changesFor = (docPath: string): ReviewResult => ({
     claim: "c", where: { path: docPath, startLine: 1, endLine: 1 }, fix: "f", completionCondition: "d",
     supersededByFindingIds: [] }]
 });
+// A round-2 result that carries the prior F1 finding to a terminal status (so carry-forward passes).
+const resolvedFor = (docPath: string): ReviewResult => ({
+  ...approved,
+  findings: [{ id: "F1", status: "resolved", severity: "HIGH", disposition: "required", category: "x",
+    claim: "c", where: { path: docPath, startLine: 1, endLine: 1 }, fix: "f", completionCondition: "d",
+    supersededByFindingIds: [] }]
+});
 const provider = (res: ReviewResult): ReviewerProvider => ({ name: "openai", review: vi.fn().mockResolvedValue(res) });
 
 function io(): CliIO & { out: string[]; err: string[] } {
@@ -169,6 +176,34 @@ describe("cli review persistence + lineage", () => {
     expect(o.err.join("")).toMatch(/prior-log|new-lineage/i);
   });
 
+  it("writes a --prior-log continuation next to its parent even when --out is omitted", async () => {
+    const OUT = join(dir, "out");
+    await main(reviewArgs(["--out", OUT]), { OPENAI_API_KEY: "k" }, io(), deps(changesFor(doc)));
+    const roundPath = join(OUT, "L1", "round-1.json");
+    const respFile = join(dir, "resp.json");
+    await writeFile(respFile, JSON.stringify([{ findingId: "F1", response: "accepted_and_revised" }]));
+    await main(["respond", "--round", roundPath, "--responses", respFile], {}, io(), deps(approved));
+    // NOTE: no --out here — the continuation must still land beside its parent, not in doc.review
+    const code = await main(reviewArgs(["--prior-log", roundPath]), { OPENAI_API_KEY: "k" }, io(), deps(resolvedFor(doc)));
+    expect(code).toBe(0);
+    expect(existsSync(join(OUT, "L1", "round-2.json"))).toBe(true);
+    expect(existsSync(join(dir, "spec.md.review"))).toBe(false);
+  });
+
+  it("rejects --out that disagrees with the --prior-log lineage directory", async () => {
+    const OUT = join(dir, "out");
+    await main(reviewArgs(["--out", OUT]), { OPENAI_API_KEY: "k" }, io(), deps(changesFor(doc)));
+    const roundPath = join(OUT, "L1", "round-1.json");
+    const respFile = join(dir, "resp.json");
+    await writeFile(respFile, JSON.stringify([{ findingId: "F1", response: "accepted_and_revised" }]));
+    await main(["respond", "--round", roundPath, "--responses", respFile], {}, io(), deps(approved));
+    const o = io();
+    const code = await main(reviewArgs(["--prior-log", roundPath, "--out", join(dir, "elsewhere")]),
+      { OPENAI_API_KEY: "k" }, o, deps(resolvedFor(doc)));
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/--out|prior-log/i);
+  });
+
   it("drives review -> respond -> re-run with --prior-log (round 2 carries the prior finding)", async () => {
     // round 1: changes_requested with one active finding F1
     const c1 = await main(reviewArgs(["--out", join(dir, "out")]), { OPENAI_API_KEY: "k" }, io(), deps(changesFor(doc)));
@@ -216,6 +251,25 @@ describe("cli respond", () => {
     const code = await main(["respond", "--round", join(dir, "x", "round-1.json"), "--responses", "-"], {}, o, deps(approved));
     expect(code).toBe(2);
     expect(o.err.join("")).toMatch(/stdin|file path/i);
+  });
+
+  it("rejects a --responses file that is not a JSON array (clear error, not a raw TypeError)", async () => {
+    await main(reviewArgs(["--out", join(dir, "out")]), { OPENAI_API_KEY: "k" }, io(), deps(changesFor(doc)));
+    const roundPath = join(dir, "out", "L1", "round-1.json");
+    const respFile = join(dir, "resp.json");
+    await writeFile(respFile, JSON.stringify({ findingId: "F1", response: "accepted_and_revised" })); // object, not array
+    const o = io();
+    const code = await main(["respond", "--round", roundPath, "--responses", respFile], {}, o, deps(approved));
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/array/i);
+  });
+
+  it("rejects --round/--responses on the review path (only valid with the respond subcommand)", async () => {
+    const o = io();
+    const code = await main(reviewArgs(["--out", join(dir, "out"), "--responses", join(dir, "resp.json")]),
+      { OPENAI_API_KEY: "k" }, o, deps(approved));
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/respond/i);
   });
 
   it("rejects --out on respond (exit 2, no sidecar written)", async () => {

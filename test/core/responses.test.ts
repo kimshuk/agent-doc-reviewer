@@ -4,6 +4,7 @@ import { writeRoundOnce, type RoundArtifact } from "../../src/core/persistence.j
 import { UsageError } from "../../src/core/errors.js";
 import type { Finding, ReviewResult } from "../../src/core/types.js";
 import { mkdtemp, writeFile, readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -73,5 +74,13 @@ describe("finalizeResponses", () => {
   it("rejects invalid responses before writing", async () => {
     const roundPath = writeRoundOnce(dir, "L1", 1, artifact(result([f({ id: "F1" })])));
     await expect(finalizeResponses(roundPath, [])).rejects.toThrow(UsageError);
+  });
+  it("refuses to finalize a response with an invalid kind (schema fail-closed, no sidecar written)", async () => {
+    const roundPath = writeRoundOnce(dir, "L1", 1, artifact(result([f({ id: "F1" })])));
+    // "accepted" is not a valid AuthorResponseKind; validateResponses alone would let it through
+    // (it's just absent from the evidence-required set), so the envelope schema must catch it.
+    await expect(finalizeResponses(roundPath, [{ findingId: "F1", response: "accepted" as any }]))
+      .rejects.toThrow(UsageError);
+    expect(existsSync(sidecarPathFor(roundPath))).toBe(false);
   });
 });

@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import type {
   Stage, Identity, ReviewerProvider, ReviewResult, Verdict, Finding, AuthorResponse, CriteriaMeta
 } from "./types.js";
@@ -121,7 +122,18 @@ export async function reviewDocument(
   const docText = await readFile(input.docPath, "utf8");
   const { meta: criteriaMeta } = parseCriteria(criteriaText);
   const criteriaSha256 = sha256(criteriaText);
-  const reviewDir = input.outDir ?? `${input.docPath}.review`;
+
+  // A continuation MUST be written into the same review dir that holds its prior-log lineage,
+  // otherwise round N+1 lands in a different tree than round N (writeRoundOnce uses reviewDir +
+  // lineageId) and the lineage splits — a later parent re-verification then can't find round N.
+  // The prior-log path is <reviewDir>/<lineageId>/round-N.json, so its reviewDir is two levels up.
+  let reviewDir = input.outDir ?? `${input.docPath}.review`;
+  if (input.priorLogPath) {
+    const priorReviewDir = dirname(dirname(input.priorLogPath));
+    if (input.outDir !== undefined && resolve(input.outDir) !== resolve(priorReviewDir))
+      throw new UsageError("--out must match the --prior-log lineage directory (or be omitted on a continuation)");
+    reviewDir = priorReviewDir;
+  }
 
   const lineage = await selectLineage({
     reviewDir, priorLogPath: input.priorLogPath, newLineage: input.newLineage,

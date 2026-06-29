@@ -5,7 +5,7 @@ import { finalizeResponses } from "../../src/core/responses.js";
 import { sha256OfFile } from "../../src/core/hash.js";
 import { UsageError } from "../../src/core/errors.js";
 import type { Finding, ReviewResult } from "../../src/core/types.js";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, copyFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -107,5 +107,16 @@ describe("selectLineage", () => {
     await finalizeResponses(roundPath, [{ findingId: "F1", response: "accepted_and_revised" }]);
     await expect(selectLineage({ ...common(), newLineage: false }))
       .rejects.toThrow(UsageError);
+  });
+  it("rejects a --prior-log whose filename is not round-<n>.json with a clear error (not NaN)", async () => {
+    const r1 = writeRoundOnce(dir, "L1", 1, art({}));
+    const s1 = await finalizeResponses(r1, [{ findingId: "F1", response: "accepted_and_revised" }]);
+    // a byte-identical copy under a non-standard name: every hash/identity check would pass,
+    // but the round number must come from the validated prior.round, not the filename.
+    const renamed = join(dir, "L1", "r1.json");
+    await copyFile(r1, renamed);
+    await copyFile(s1, join(dir, "L1", "r1.responses.json"));
+    await expect(selectLineage({ ...common(), newLineage: false, priorLogPath: renamed }))
+      .rejects.toThrow(/round-1\.json/);
   });
 });

@@ -83,13 +83,20 @@ export async function main(
       // --responses is a FILE only (no stdin) in v1.
       if (respFile === "-")
         throw new UsageError("reading --responses from stdin (-) is not supported in v1; pass a file path");
-      const responses = JSON.parse(await readFile(respFile, "utf8")) as AuthorResponse[];
+      const parsed = JSON.parse(await readFile(respFile, "utf8")) as unknown;
+      if (!Array.isArray(parsed))
+        throw new UsageError("--responses file must contain a JSON array of author responses");
+      const responses = parsed as AuthorResponse[];
       const sidecar = await finalizeResponses(roundPath, responses);
       io.stdout(JSON.stringify({ finalized: sidecar }));
       return 0;
     }
 
     if (!doc) throw new UsageError("a <doc> path is required");
+    // --round/--responses belong to the respond subcommand only; reject (don't silently ignore)
+    // them on the review/compare path, the same accept-and-ignore failure the --out guard avoids.
+    if (flags["--round"] !== undefined || flags["--responses"] !== undefined)
+      throw new UsageError("--round/--responses are only valid with the `respond` subcommand");
     const stage = flags["--stage"];
     if (!stage) throw new UsageError("--stage is required");
     if (stage !== "spec") throw new UsageError(`only --stage spec is supported (plan stage arrives in Phase 3), got "${stage}"`);
