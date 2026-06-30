@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import type { ProviderSpec, Stage, AuthorResponse } from "../core/types.js";
-import { reviewDocument, buildReviewInputs } from "../core/index.js";
+import { reviewDocument, buildReviewInputs, parseRequirements } from "../core/index.js";
 import { runCompare } from "../core/compare.js";
 import { finalizeResponses } from "../core/responses.js";
+import { verifyApproval } from "../core/approval.js";
 import { selectProvider } from "../core/providers/registry.js";
 import { assertCrossModel } from "../core/identity.js";
 import { UsageError } from "../core/errors.js";
@@ -20,7 +21,8 @@ export interface CliDeps {
 
 const VALUE_FLAGS = [
   "--stage", "--criteria", "--reviewer-provider", "--reviewer-model", "--reviewer-base-url",
-  "--author-provider", "--author-model", "--compare", "--prior-log", "--out", "--round", "--responses"
+  "--author-provider", "--author-model", "--compare", "--prior-log", "--out", "--round", "--responses",
+  "--prior", "--prior-approval"
 ] as const;
 const BOOL_FLAGS = ["--allow-same-model", "--new-lineage"] as const;
 
@@ -99,7 +101,9 @@ export async function main(
       throw new UsageError("--round/--responses are only valid with the `respond` subcommand");
     const stage = flags["--stage"];
     if (!stage) throw new UsageError("--stage is required");
-    if (stage !== "spec") throw new UsageError(`only --stage spec is supported (plan stage arrives in Phase 3), got "${stage}"`);
+    if (stage !== "spec" && stage !== "plan") throw new UsageError(`--stage must be spec or plan, got "${stage}"`);
+    if (stage === "spec" && (flags["--prior"] !== undefined || flags["--prior-approval"] !== undefined))
+      throw new UsageError("--prior/--prior-approval are only valid with --stage plan");
     const criteriaPath = flags["--criteria"];
     if (!criteriaPath) throw new UsageError("--criteria is required");
 
@@ -124,8 +128,16 @@ export async function main(
       }
       const targets = parseTargets(compare);
       for (const t of targets) assertCrossModel(author, t, allowSameModel);
+      let prior: { path: string; text: string; requirementIds: string[] } | undefined;
+      if (stage === "plan") {
+        const priorPath = flags["--prior"];
+        if (!priorPath) throw new UsageError("--stage plan requires --prior <approved upstream spec>");
+        const priorText = await readFile(priorPath, "utf8");
+        await verifyApproval({ approvalPath: flags["--prior-approval"], priorPath, priorReviewDir: `${priorPath}.review` });
+        prior = { path: priorPath, text: priorText, requirementIds: parseRequirements(priorText) };
+      }
       const { system, user, ctx, criteriaMeta } = await buildReviewInputs({
-        docPath: doc, stage: stage as Stage, criteriaPath, priorFindings: [], priorResponses: []
+        docPath: doc, stage: stage as Stage, criteriaPath, prior, priorFindings: [], priorResponses: []
       });
       const entries = targets.map(t => ({ provider: makeProvider(t, env2), model: t.model }));
       const out = await runCompare({ entries, system, user, ctx, criteriaMeta, now });
@@ -140,7 +152,8 @@ export async function main(
       reviewerIdentity: { provider: reviewerProvider, model: reviewerModel },
       author, allowSameModel,
       priorLogPath: flags["--prior-log"], newLineage: bools.has("--new-lineage"),
-      outDir: flags["--out"], now, mintLineageId
+      outDir: flags["--out"], now, mintLineageId,
+      priorPath: flags["--prior"], priorApprovalPath: flags["--prior-approval"]
     });
     io.stdout(JSON.stringify({ verdict, result }));
     return verdict === "approved" ? 0 : 1;

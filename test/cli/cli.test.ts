@@ -1,8 +1,10 @@
 // CLI scope: `review` (now persisting via reviewDocument) + `compare` (stateless) + `respond`.
-// Plan stage / --prior / --prior-approval remain Phase 3.
+// Plan stage / --prior / --prior-approval wired in P3-T4.
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { main, type CliIO } from "../../src/cli/index.js";
 import type { ReviewerProvider, ReviewResult, ProviderSpec } from "../../src/core/types.js";
+import { writeRoundOnce, readRound } from "../../src/core/persistence.js";
+import { sha256 } from "../../src/core/hash.js";
 import { mkdtemp, writeFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,6 +14,13 @@ const approved: ReviewResult = {
   feasibility: "feasible", feasibilityRationale: "", feasibilityFindingIds: [],
   criteriaCoverage: [{ id: "CRIT-A", assessment: "met", note: "", findingIds: [] }],
   upstreamCoverage: [], findings: []
+};
+// plan-stage result: criteriaCoverage covers CRIT-A, upstreamCoverage covers REQ-X (all met)
+const planGood: ReviewResult = {
+  feasibility: "feasible", feasibilityRationale: "", feasibilityFindingIds: [],
+  criteriaCoverage: [{ id: "CRIT-A", assessment: "met", note: "", findingIds: [] }],
+  upstreamCoverage: [{ id: "REQ-X", assessment: "met", note: "", findingIds: [] }],
+  findings: []
 };
 // Findings must cite a path present in inputLineCounts (the doc) with in-range lines,
 // per the frozen location-bounds check; the doc is a 2-line file written in beforeEach.
@@ -230,6 +239,92 @@ describe("cli review persistence + lineage", () => {
     const round2 = JSON.parse(await readFile(join(dir, "out", "L1", "round-2.json"), "utf8"));
     expect(round2.parent_round_sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(round2.parent_responses_sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// Lay down an approved stage:spec round for the prior (up.md) so plan-stage tests can resolve it.
+async function setupApprovedPrior(dir: string): Promise<{ upPath: string }> {
+  const upText = "- [REQ-X] a requirement\n";
+  const upPath = join(dir, "up.md");
+  await writeFile(upPath, upText);
+  const specCriteriaText = "- [CRIT-A] keep small\n";
+  writeRoundOnce(`${upPath}.review`, "S1", 1, {
+    schemaVersion: 1, round: 1, lineageId: "S1",
+    timestamp: "2026-06-22T00:00:00Z", stage: "spec",
+    author: { provider: "openai", model: "gpt" },
+    reviewer: { provider: "openai", model: "gpt" },
+    document_sha256: sha256(upText),
+    criteria_sha256: sha256(specCriteriaText),
+    prior_document_sha256: null, parent_round_sha256: null,
+    parent_responses_sha256: null, prior_approval_sha256: null,
+    criteriaMeta: { "CRIT-A": { required: true } },
+    requirementIds: [], verdict: "approved",
+    result: {
+      feasibility: "feasible", feasibilityRationale: "", feasibilityFindingIds: [],
+      criteriaCoverage: [{ id: "CRIT-A", assessment: "met", note: "", findingIds: [] }],
+      upstreamCoverage: [], findings: []
+    }
+  });
+  return { upPath };
+}
+
+describe("cli plan stage", () => {
+  it("plan-stage review approves and persists a plan round", async () => {
+    const { upPath } = await setupApprovedPrior(dir);
+    const outdir = join(dir, "plan-out");
+    const o = io();
+    const code = await main(
+      [doc, "--stage", "plan", "--criteria", crit, "--prior", upPath,
+       "--reviewer-provider", "openai", "--reviewer-model", "gpt",
+       "--author-provider", "anthropic", "--author-model", "claude",
+       "--out", outdir],
+      { OPENAI_API_KEY: "k" }, o, deps(planGood)
+    );
+    expect(code).toBe(0);
+    const printed = JSON.parse(o.out.join(""));
+    expect(printed.verdict).toBe("approved");
+  });
+
+  it("plan-stage review without --prior exits 2", async () => {
+    const o = io();
+    const code = await main(
+      [doc, "--stage", "plan", "--criteria", crit,
+       "--reviewer-provider", "openai", "--reviewer-model", "gpt",
+       "--author-provider", "anthropic", "--author-model", "claude"],
+      { OPENAI_API_KEY: "k" }, o, deps(planGood)
+    );
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/--prior/);
+  });
+
+  it("spec stage + --prior is rejected", async () => {
+    const o = io();
+    const code = await main(
+      [doc, "--stage", "spec", "--criteria", crit, "--prior", join(dir, "up.md"),
+       "--reviewer-provider", "openai", "--reviewer-model", "gpt",
+       "--author-provider", "anthropic", "--author-model", "claude"],
+      { OPENAI_API_KEY: "k" }, o, deps(approved)
+    );
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/--prior/);
+  });
+
+  it("anthropic is accepted as the reviewer provider", async () => {
+    // Registry-level resolution of anthropic is covered by P3-T1's registry.test.ts.
+    // This test proves the CLI plumbs the reviewer identity into the persisted round.
+    const outdir = join(dir, "anth-out");
+    const o = io();
+    const code = await main(
+      [doc, "--stage", "spec", "--criteria", crit,
+       "--reviewer-provider", "anthropic", "--reviewer-model", "claude",
+       "--author-provider", "openai", "--author-model", "gpt",
+       "--out", outdir],
+      { ANTHROPIC_API_KEY: "k" }, o, deps(approved)
+    );
+    expect(code).toBe(0);
+    const roundPath = join(outdir, "L1", "round-1.json");
+    const round = readRound(roundPath);
+    expect(round.reviewer).toEqual({ provider: "anthropic", model: "claude" });
   });
 });
 
