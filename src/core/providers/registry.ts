@@ -1,6 +1,7 @@
 import type { ProviderSpec, ReviewerProvider } from "../types.js";
 import { UsageError } from "../errors.js";
 import { createOpenAIProvider } from "./openai.js";
+import { createAnthropicProvider } from "./anthropic.js";
 
 export function selectProvider(
   spec: ProviderSpec, env: Record<string, string | undefined>
@@ -11,9 +12,14 @@ export function selectProvider(
       if (!apiKey) throw new UsageError("OPENAI_API_KEY is not set");
       return createOpenAIProvider({ apiKey, baseURL: env.OPENAI_BASE_URL });
     }
+    case "anthropic": {
+      const apiKey = env.ANTHROPIC_API_KEY;
+      if (!apiKey) throw new UsageError("ANTHROPIC_API_KEY is not set");
+      return createAnthropicProvider({ apiKey });
+    }
     default:
       throw new UsageError(
-        `Unsupported reviewer provider: ${spec.provider} (Phase 1 supports openai-compatible only)`
+        `Unsupported reviewer provider: ${spec.provider} (supported: openai, anthropic)`
       );
   }
 }
