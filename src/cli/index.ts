@@ -8,8 +8,10 @@ import { selectProvider } from "../core/providers/registry.js";
 import { assertCrossModel } from "../core/identity.js";
 import { UsageError } from "../core/errors.js";
 import { readFile } from "node:fs/promises";
+import { readFileSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { loadEnv } from "./env.js";
 
 export interface CliIO { stdout: (s: string) => void; stderr: (s: string) => void }
 
@@ -22,7 +24,7 @@ export interface CliDeps {
 const VALUE_FLAGS = [
   "--stage", "--criteria", "--reviewer-provider", "--reviewer-model", "--reviewer-base-url",
   "--author-provider", "--author-model", "--compare", "--prior-log", "--out", "--round", "--responses",
-  "--prior", "--prior-approval"
+  "--prior", "--prior-approval", "--dotenv"
 ] as const;
 const BOOL_FLAGS = ["--allow-same-model", "--new-lineage"] as const;
 
@@ -170,5 +172,20 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     stdout: s => process.stdout.write(s + "\n"),
     stderr: s => process.stderr.write(s + "\n")
   };
-  main(process.argv.slice(2), process.env, io).then(code => { process.exitCode = code; });
+  // Load a `.env` file (default `.env` in CWD, or `--dotenv <path>`) into the environment BEFORE
+  // main reads any credential. A real exported shell var always wins over the file (see loadEnv),
+  // so a stray `.env` can't override a live secret. An explicit `--dotenv` that does not exist is a
+  // hard error; a missing default `.env` is silently skipped (env-file support is opt-in).
+  // NOTE: the flag is `--dotenv`, NOT `--env-file` — Node's own built-in `--env-file` would
+  // intercept that name before this script ever sees it.
+  const argv = process.argv.slice(2);
+  const efIdx = argv.indexOf("--dotenv");
+  const envPath = efIdx >= 0 ? argv[efIdx + 1] : ".env";
+  if (efIdx >= 0 && (envPath === undefined || !existsSync(envPath))) {
+    io.stderr(`--dotenv file not found: ${envPath ?? "(missing path)"}`);
+    process.exitCode = 2;
+  } else {
+    const fileText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+    main(argv, loadEnv(fileText, process.env), io).then(code => { process.exitCode = code; });
+  }
 }

@@ -240,6 +240,16 @@ describe("cli review persistence + lineage", () => {
     expect(round2.parent_round_sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(round2.parent_responses_sha256).toMatch(/^[0-9a-f]{64}$/);
   });
+
+  // The entry shim consumes --dotenv (it loads the env file before main runs); main must accept
+  // the flag without treating it as an unknown option. Its value is irrelevant to main.
+  it("tolerates the --dotenv flag (consumed by the shim, ignored by main)", async () => {
+    const o = io();
+    const code = await main(reviewArgs(["--out", join(dir, "out"), "--dotenv", "ignored.env"]),
+      { OPENAI_API_KEY: "k" }, o, deps(approved));
+    expect(code).toBe(0);
+    expect(o.err.join("")).not.toMatch(/Unknown option/);
+  });
 });
 
 // Lay down an approved stage:spec round for the prior (up.md) so plan-stage tests can resolve it.
