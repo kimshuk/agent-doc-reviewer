@@ -55,6 +55,20 @@ describe("verifyApproval", () => {
     writeRoundOnce(specDir, "L1", 1, art({ document_sha256: sha256("# spec\n"), verdict: "changes_requested" }));
     await expect(verifyApproval({ priorPath: specPath, priorReviewDir: specDir })).rejects.toThrow(UsageError);
   });
+  it("explicit --prior-approval is NOT a trust bypass: tampered artifact is still rejected", async () => {
+    // Mirror the flipped-verdict fixture but pass the path DIRECTLY via approvalPath so the
+    // explicit path is exercised (not the auto-locate path).
+    const tampered = art({
+      document_sha256: sha256("# spec\n"), verdict: "approved",
+      result: { ...approvedResult, criteriaCoverage: [{ id: "CRIT-A", assessment: "not_met", note: "", findingIds: ["F1"] }],
+        findings: [{ id: "F1", status: "new", severity: "HIGH", disposition: "required", category: "x",
+          claim: "c", where: { path: "spec.md", startLine: 1, endLine: 1 }, fix: "f",
+          completionCondition: "d", supersededByFindingIds: [] }] }
+    });
+    const tamperedPath = writeRoundOnce(specDir, "L1", 1, tampered);
+    await expect(verifyApproval({ approvalPath: tamperedPath, priorPath: specPath, priorReviewDir: specDir }))
+      .rejects.toThrow(UsageError);
+  });
   it("errors when >1 lineage qualifies (ambiguous) but accepts an explicit --prior-approval", async () => {
     const a = writeRoundOnce(specDir, "L1", 1, art({ document_sha256: sha256("# spec\n") }));
     writeRoundOnce(specDir, "L2", 1, art({ lineageId: "L2", document_sha256: sha256("# spec\n") }));

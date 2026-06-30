@@ -283,6 +283,8 @@ describe("cli plan stage", () => {
     expect(code).toBe(0);
     const printed = JSON.parse(o.out.join(""));
     expect(printed.verdict).toBe("approved");
+    const round = readRound(join(outdir, "L1", "round-1.json"));
+    expect(round.stage).toBe("plan");
   });
 
   it("plan-stage review without --prior exits 2", async () => {

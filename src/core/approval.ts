@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { UsageError } from "./errors.js";
 import { readRound, listRounds, type RoundArtifact } from "./persistence.js";
@@ -14,6 +14,8 @@ function findApprovedFor(reviewDir: string, priorHash: string): string {
   if (!existsSync(reviewDir)) throw new UsageError(`No review dir for --prior approval: ${reviewDir}`);
   const perLineage: Array<{ path: string; round: number }> = [];
   for (const lineage of readdirSync(reviewDir)) {
+    // Skip stray non-directory entries; passing one to listRounds throws ENOTDIR.
+    if (!statSync(join(reviewDir, lineage)).isDirectory()) continue;
     const lineageDir = join(reviewDir, lineage);
     let best: { path: string; round: number } | undefined;
     for (const n of listRounds(lineageDir)) {
@@ -55,6 +57,8 @@ export async function verifyApproval(args: {
   if (recomputed !== "approved" || artifact.verdict !== "approved")
     throw new UsageError(`Approval artifact is not a valid approved round (stored=${artifact.verdict}, recomputed=${recomputed})`);
 
+  // ONLY stage enforcement on the explicit --prior-approval path: findApprovedFor pre-filters
+  // stage:"spec" during auto-locate, so this backstop is what protects a directly-passed artifact.
   if (artifact.stage !== "spec") throw new UsageError(`Approval artifact stage is ${artifact.stage}, expected spec`);
 
   // priorHash computed above; an explicit --prior-approval is re-checked here too.
