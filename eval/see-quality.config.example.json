@@ -1,0 +1,8 @@
+{
+  "criteria": "examples/criteria.spec.md",
+  "author": { "provider": "anthropic", "model": "claude-opus-4-8" },
+  "reviewers": ["openai:gpt-5.4", "anthropic:claude-sonnet-4-6"],
+  "allowSameModel": false,
+  "baseUrl": null,
+  "specs": ["eval/samples/sample-spec.md"]
+}
