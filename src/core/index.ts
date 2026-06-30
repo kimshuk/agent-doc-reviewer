@@ -5,12 +5,13 @@ import type {
 } from "./types.js";
 import { sha256 } from "./hash.js";
 import { renderLineNumbered, lineCount } from "./render.js";
-import { parseCriteria } from "./criteria.js";
+import { parseCriteria, parseRequirements } from "./criteria.js";
 import { assertCrossModel } from "./identity.js";
 import { buildSystemPrompt, buildUserPrompt } from "./prompt.js";
 import { runReview } from "./review.js";
 import { selectLineage } from "./lineage.js";
 import { writeRoundOnce, type RoundArtifact } from "./persistence.js";
+import { verifyApproval } from "./approval.js";
 import { UsageError } from "./errors.js";
 import type { SemanticContext } from "./semantics.js";
 
@@ -114,14 +115,39 @@ export interface ReviewDocumentInput {
 export async function reviewDocument(
   input: ReviewDocumentInput
 ): Promise<{ verdict: Verdict; result: ReviewResult; roundPath: string }> {
-  // Reserved-field guard: reject the Phase-3 plan-stage surface loudly rather than silently ignore it.
-  if (input.stage !== "spec" || input.priorPath !== undefined || input.priorApprovalPath !== undefined)
-    throw new UsageError("plan stage is not supported until Phase 3");
+  // Stage-aware validation.
+  if (input.stage === "spec") {
+    if (input.priorPath !== undefined || input.priorApprovalPath !== undefined)
+      throw new UsageError("--prior/--prior-approval are only valid with --stage plan");
+  } else if (input.stage === "plan") {
+    if (input.priorPath === undefined)
+      throw new UsageError("--stage plan requires --prior <approved upstream spec>");
+  } else {
+    throw new UsageError(`unknown stage: ${input.stage}`);
+  }
 
   const criteriaText = await readFile(input.criteriaPath, "utf8");
   const docText = await readFile(input.docPath, "utf8");
   const { meta: criteriaMeta } = parseCriteria(criteriaText);
   const criteriaSha256 = sha256(criteriaText);
+
+  // Resolve the upstream prior (plan stage only); spec defaults stay undefined / null / [].
+  let prior: { path: string; text: string; requirementIds: string[] } | undefined;
+  let priorDocumentSha256: string | null = null;
+  let priorApprovalSha256: string | null = null;
+  let requirementIds: string[] = [];
+  if (input.stage === "plan") {
+    const priorPath = input.priorPath!;                 // guaranteed by the guard above
+    const priorText = await readFile(priorPath, "utf8");
+    const priorReviewDir = `${priorPath}.review`;        // same convention reviewDocument uses for outDir
+    const { approvalSha256 } = await verifyApproval({
+      approvalPath: input.priorApprovalPath, priorPath, priorReviewDir
+    });
+    requirementIds = parseRequirements(priorText);       // throws if the prior has no [REQ-*]
+    prior = { path: priorPath, text: priorText, requirementIds };
+    priorDocumentSha256 = sha256(priorText);
+    priorApprovalSha256 = approvalSha256;
+  }
 
   // A continuation MUST be written into the same review dir that holds its prior-log lineage,
   // otherwise round N+1 lands in a different tree than round N (writeRoundOnce uses reviewDir +
@@ -137,7 +163,7 @@ export async function reviewDocument(
 
   const lineage = await selectLineage({
     reviewDir, priorLogPath: input.priorLogPath, newLineage: input.newLineage,
-    stage: input.stage, criteriaSha256, priorDocumentSha256: null, mintLineageId: input.mintLineageId
+    stage: input.stage, criteriaSha256, priorDocumentSha256, mintLineageId: input.mintLineageId
   });
 
   // Call the FROZEN reviewOnce (it re-reads doc/criteria + runs assertCrossModel internally).
@@ -145,15 +171,17 @@ export async function reviewDocument(
     docPath: input.docPath, stage: input.stage, criteriaPath: input.criteriaPath,
     reviewer: input.reviewer, reviewerIdentity: input.reviewerIdentity,
     author: input.author, allowSameModel: input.allowSameModel,
+    prior,
     priorFindings: lineage.priorFindings, priorResponses: lineage.priorResponses
   });
 
   const artifact: RoundArtifact = {
     schemaVersion: 1, round: lineage.round, lineageId: lineage.lineageId, timestamp: input.now(),
     stage: input.stage, author: input.author, reviewer: input.reviewerIdentity,
-    document_sha256: sha256(docText), criteria_sha256: criteriaSha256, prior_document_sha256: null,
+    document_sha256: sha256(docText), criteria_sha256: criteriaSha256,
+    prior_document_sha256: priorDocumentSha256,
     parent_round_sha256: lineage.parentRoundSha256, parent_responses_sha256: lineage.parentResponsesSha256,
-    prior_approval_sha256: null, criteriaMeta, requirementIds: [], verdict, result
+    prior_approval_sha256: priorApprovalSha256, criteriaMeta, requirementIds, verdict, result
   };
   const roundPath = writeRoundOnce(reviewDir, lineage.lineageId, lineage.round, artifact);
   return { verdict, result, roundPath };
