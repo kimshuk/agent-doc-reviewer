@@ -1,24 +1,28 @@
 #!/usr/bin/env node
-import type { ProviderSpec, Stage } from "../core/types.js";
-import { reviewOnce, buildReviewInputs } from "../core/index.js";
+import type { ProviderSpec, Stage, AuthorResponse } from "../core/types.js";
+import { reviewDocument, buildReviewInputs } from "../core/index.js";
 import { runCompare } from "../core/compare.js";
+import { finalizeResponses } from "../core/responses.js";
 import { selectProvider } from "../core/providers/registry.js";
 import { assertCrossModel } from "../core/identity.js";
 import { UsageError } from "../core/errors.js";
+import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 export interface CliIO { stdout: (s: string) => void; stderr: (s: string) => void }
 
 export interface CliDeps {
   now?: () => string;
+  mintLineageId?: () => string;
   makeProvider?: typeof selectProvider;
 }
 
 const VALUE_FLAGS = [
   "--stage", "--criteria", "--reviewer-provider", "--reviewer-model", "--reviewer-base-url",
-  "--author-provider", "--author-model", "--compare", "--prior-log"
+  "--author-provider", "--author-model", "--compare", "--prior-log", "--out", "--round", "--responses"
 ] as const;
-const BOOL_FLAGS = ["--allow-same-model"] as const;
+const BOOL_FLAGS = ["--allow-same-model", "--new-lineage"] as const;
 
 interface Parsed {
   doc?: string;
@@ -61,14 +65,41 @@ export async function main(
   argv: string[], env: Record<string, string | undefined>, io: CliIO, deps: CliDeps = {}
 ): Promise<number> {
   const now = deps.now ?? (() => new Date().toISOString());
+  const mintLineageId = deps.mintLineageId ?? (() => `${now().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`);
   const makeProvider = deps.makeProvider ?? selectProvider;
   try {
     const { doc, flags, bools } = parseArgs(argv);
 
+    // `respond` finalizes the author-response sidecar beside an existing round artifact.
+    if (doc === "respond") {
+      // v1 contract: the sidecar is fixed beside its round, so respond takes NO --out — reject it
+      // loudly rather than accept-and-ignore (which would mislead the caller).
+      if (flags["--out"] !== undefined)
+        throw new UsageError("--out is not supported by respond (the sidecar is fixed beside its round)");
+      const roundPath = flags["--round"];
+      if (!roundPath) throw new UsageError("respond requires --round <round-file>");
+      const respFile = flags["--responses"];
+      if (!respFile) throw new UsageError("respond requires --responses <file>");
+      // --responses is a FILE only (no stdin) in v1.
+      if (respFile === "-")
+        throw new UsageError("reading --responses from stdin (-) is not supported in v1; pass a file path");
+      const parsed = JSON.parse(await readFile(respFile, "utf8")) as unknown;
+      if (!Array.isArray(parsed))
+        throw new UsageError("--responses file must contain a JSON array of author responses");
+      const responses = parsed as AuthorResponse[];
+      const sidecar = await finalizeResponses(roundPath, responses);
+      io.stdout(JSON.stringify({ finalized: sidecar }));
+      return 0;
+    }
+
     if (!doc) throw new UsageError("a <doc> path is required");
+    // --round/--responses belong to the respond subcommand only; reject (don't silently ignore)
+    // them on the review/compare path, the same accept-and-ignore failure the --out guard avoids.
+    if (flags["--round"] !== undefined || flags["--responses"] !== undefined)
+      throw new UsageError("--round/--responses are only valid with the `respond` subcommand");
     const stage = flags["--stage"];
     if (!stage) throw new UsageError("--stage is required");
-    if (stage !== "spec") throw new UsageError(`only --stage spec is supported in Phase 1, got "${stage}"`);
+    if (stage !== "spec") throw new UsageError(`only --stage spec is supported (plan stage arrives in Phase 3), got "${stage}"`);
     const criteriaPath = flags["--criteria"];
     if (!criteriaPath) throw new UsageError("--criteria is required");
 
@@ -103,11 +134,13 @@ export async function main(
     }
 
     const provider = makeProvider({ provider: reviewerProvider, model: reviewerModel }, env2);
-    const { verdict, result } = await reviewOnce({
+    const { verdict, result } = await reviewDocument({
       docPath: doc, stage: stage as Stage, criteriaPath,
       reviewer: { provider, model: reviewerModel },
       reviewerIdentity: { provider: reviewerProvider, model: reviewerModel },
-      author, allowSameModel, priorFindings: [], priorResponses: []
+      author, allowSameModel,
+      priorLogPath: flags["--prior-log"], newLineage: bools.has("--new-lineage"),
+      outDir: flags["--out"], now, mintLineageId
     });
     io.stdout(JSON.stringify({ verdict, result }));
     return verdict === "approved" ? 0 : 1;

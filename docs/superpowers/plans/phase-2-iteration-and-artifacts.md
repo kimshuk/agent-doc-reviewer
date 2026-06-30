@@ -1,67 +1,78 @@
 # Phase 2 — Iteration & Immutable Artifacts (spec stage)
 
-> Execution slice over the approved 21-task plan
-> `docs/superpowers/plans/2026-06-22-review-doc.md`. Begins **only** after Phase 1's empirical
-> gate has passed (`phase-1-review-quality-validation.md`). The 21-task plan and approved spec
-> are unmodified.
+> A slice of the approved 21-task plan
+> (`docs/superpowers/plans/2026-06-22-review-doc.md`). Starts **only** after Phase 1's
+> empirical gate passes (`phase-1-review-quality-validation.md`). The 21-task plan and the
+> approved spec are not changed.
 
-## Hypothesis & user value
+## What we're testing, and why it helps the user
 
-**Hypothesis:** once review quality is proven (Phase 1), persisting **immutable** rounds +
-**finalized** author responses + **lineage continuity** makes the iterative review loop reliable
-and produces a trustworthy, tamper-evident approval record — worth the integrity machinery.
+**The bet:** Phase 1 already proved the review is good. Phase 2 adds the paper trail. If we save
+each review round so it **can't be changed after the fact**, save the author's **final answers**
+to each finding, and **link the rounds together**, then the back-and-forth review loop becomes
+reliable and the final "approved" record is trustworthy and tamper-evident. That's worth the extra
+machinery.
 
-**User value:** multi-round spec review with durable artifacts; a disciplined
-`review-doc respond` finalize flow; re-running a later round via `--prior-log` that carries prior
-findings + responses and verifies continuity. The approval state becomes reproducible.
+**What the user gets:**
+- Multi-round spec review with durable saved records.
+- A clear `review-doc respond` step to lock in author answers.
+- The ability to re-run a later round with `--prior-log`, which carries forward the earlier
+  findings and answers and checks that the chain is intact.
+- An approval state you can reproduce and re-verify.
 
 ## In scope
 
-- Hashing (`sha256`, `sha256OfFile`).
-- The **remaining** semantic checks: provenance (`still_present`/`resolved`/`superseded` ids ∈
-  `priorFindings`; `new` ids don't collide), carry-forward completeness (every prior **active**
-  finding reappears exactly once, with an **allowed next status: `still_present` | `resolved` |
-  `superseded`** — note `still_present` is *not* terminal; only `resolved`/`superseded` are
-  terminal), supersede linkage, and the `mode`-gated split (`within_result` vs `full`).
-- Write-once round artifacts + the `writeRoundOnce` fail-closed validation (schema +
-  round/lineageId match) + envelope schemas (`ROUND_ARTIFACT_SCHEMA`,
-  `RESPONSES_ARTIFACT_SCHEMA`) deferred from Phase-1 Task 2.
-- Author responses: `validateResponses` + finalize-once sidecar (`crypto.randomUUID` temp +
-  no-clobber `linkSync`), `readResponses` envelope validation.
-- Lineage selection & continuity: `--prior-log` latest-round + stage/criteria/prior checks,
-  sidecar re-bind, **immediate parent-pair** re-verification against on-disk `round-(N-1)` files,
-  `--new-lineage`, bootstrap.
-- A **new** `reviewDocument` export that **calls** Phase-1's frozen `reviewOnce` and layers the
-  persisting path on top (writes the immutable `round-N.json`, returns `roundPath`). It resolves
-  priors from the lineage and passes them through the **already-defined** `ReviewOnceInput` fields
-  (`priorFindings`, `priorResponses`) — **no change to `reviewOnce`'s signature**. `reviewOnce` is
-  not modified; `validateSemantic` (same signature) is what gains the lifecycle behavior when
+- **Hashing** — `sha256`, `sha256OfFile`.
+- **The remaining semantic checks** (added to the Phase-1 `validateSemantic`):
+  - **Provenance** — every finding marked `still_present` / `resolved` / `superseded` must point
+    to an id that existed in `priorFindings`; a `new` id must not reuse a prior id.
+  - **Carry-forward completeness** — every prior **active** finding must show up again exactly
+    once, with an allowed next status: `still_present`, `resolved`, or `superseded`. Note:
+    `still_present` is **not** an ending state — only `resolved` and `superseded` end a finding.
+  - **Supersede linkage** — a superseded finding must point at a real replacement.
+  - **Mode split** — these run only in `full` mode, not `within_result`.
+- **Write-once round records** plus:
+  - `writeRoundOnce`, which refuses to write if the record is malformed or its round/lineageId
+    don't match where it's being saved (fail-closed).
+  - The record/answer schemas (`ROUND_ARTIFACT_SCHEMA`, `RESPONSES_ARTIFACT_SCHEMA`) that were
+    deferred from Phase-1 Task 2.
+- **Author responses** — `validateResponses`, a finalize-once sidecar file (write to a unique
+  `crypto.randomUUID` temp name, then `linkSync` so an existing file is never overwritten), and
+  `readResponses` that re-checks the saved file.
+- **Lineage selection & continuity** — pick the lineage from `--prior-log` (must be its latest
+  round), check stage/criteria/prior match, re-bind the sidecar, re-verify the **immediate
+  parent pair** against the `round-(N-1)` files on disk, plus `--new-lineage` and bootstrap.
+- **A new `reviewDocument` export** that **calls** Phase-1's frozen `reviewOnce` and adds the
+  saving layer on top: it writes the immutable `round-N.json` and returns `roundPath`. It finds
+  priors from the lineage and passes them through `reviewOnce`'s **existing** `ReviewOnceInput`
+  fields (`priorFindings`, `priorResponses`) — **`reviewOnce`'s signature does not change**.
+  `validateSemantic` (same signature) is what gains the new lifecycle behavior when
   `priorFindings` is non-empty.
-- CLI remainder: `respond` (`--responses <file>`, rejects `--out` and stdin `-`), `--prior-log`,
-  `--new-lineage`, `--out`.
+- **CLI additions** — `respond` (`--responses <file>`; rejects `--out` and stdin `-`),
+  `--prior-log`, `--new-lineage`, `--out`.
 
-## Out of scope (deferred)
+## Out of scope (saved for Phase 3)
 
-- Plan-stage upstream review, `[REQ-*]` upstream coverage, approval-artifact verification,
-  `--prior`/`--prior-approval`, Anthropic adapter, `review-loop` skill → **Phase 3**.
+Plan-stage review, `[REQ-*]` upstream coverage, approval-artifact verification,
+`--prior` / `--prior-approval`, the Anthropic adapter, and the `review-loop` skill.
 
-## Tasks pulled from the 21-task plan (with scope delta)
+## Tasks pulled from the 21-task plan (with what changes for Phase 2)
 
-| Task | Pull | Delta for Phase 2 |
+| Task | Pull | Change for Phase 2 |
 |------|------|-------------------|
-| 2 (remainder) | partial | Add `ROUND_ARTIFACT_SCHEMA` + `RESPONSES_ARTIFACT_SCHEMA` + `validateRoundArtifact`/`validateResponsesArtifact` (deferred from Phase 1), including the parent-hash `if/then/else` invariant and non-empty-identity `minLength`. |
+| 2 (remainder) | partial | Add `ROUND_ARTIFACT_SCHEMA` + `RESPONSES_ARTIFACT_SCHEMA` + `validateRoundArtifact`/`validateResponsesArtifact` (deferred from Phase 1), including the parent-hash `if/then/else` invariant and the non-empty-identity `minLength`. |
 | 3 Hashing | full | none |
-| 8 (remainder) | partial | Add provenance, carry-forward completeness, lifecycle transitions, supersede linkage to the **same** `validateSemantic`/`SemanticContext` shipped in Phase 1. Phase-1 checks #1–#4 stay as-is. |
+| 8 (remainder) | partial | Add provenance, carry-forward completeness, lifecycle transitions, and supersede linkage to the **same** `validateSemantic`/`SemanticContext` from Phase 1. Phase-1 checks #1–#4 stay as-is. |
 | 14 Persistence | full | Write-once + `writeRoundOnce` fail-closed validation + `readRound` envelope validation. |
 | 15 Author responses | full | `validateResponses` + finalize-once sidecar + `readResponses`. |
 | 16 Lineage selection & continuity | full | latest-round/continuity + sidecar re-bind + immediate parent-pair re-verification + bootstrap. |
 | 19 (remainder) | partial | Add a **new** `reviewDocument` that calls the frozen `reviewOnce` (Phase 1) and adds `selectLineage` + `writeRoundOnce`; returns `{verdict, result, roundPath}`. Do **not** edit `reviewOnce`. (Plan-stage `verifyApproval` stays out — Phase 3.) |
-| 20 (remainder) | partial | Add `respond` subcommand + `--prior-log`, `--new-lineage`, `--out`. (`--prior`/`--prior-approval` stay out — Phase 3.) |
+| 20 (remainder) | partial | Add the `respond` subcommand + `--prior-log`, `--new-lineage`, `--out`. (`--prior`/`--prior-approval` stay out — Phase 3.) |
 
-## Frozen `reviewDocument` contract (defined in Phase 2, never edited)
+## Frozen `reviewDocument` contract (set here, never edited)
 
-Like `reviewOnce`, `reviewDocument`'s **input type is fixed here with Phase 3's plan-stage fields
-already present but reserved**, so Phase 3 fills them without changing the signature:
+Like `reviewOnce`, `reviewDocument`'s **input type is fixed now, with Phase 3's plan-stage fields
+already present but reserved** — so Phase 3 can fill them in without changing the signature:
 
 ```ts
 export interface ReviewDocumentInput {
@@ -85,67 +96,67 @@ export interface ReviewDocumentInput {
 export function reviewDocument(input: ReviewDocumentInput): Promise<{ verdict: Verdict; result: ReviewResult; roundPath: string }>;
 ```
 
-- **Phase 2 supports `stage:"spec"` only.** If `stage === "plan"` or `priorPath`/
-  `priorApprovalPath` is supplied, Phase 2 throws a `UsageError` ("plan stage is not supported
-  until Phase 3") — reserved, not silently ignored. Phase 3 activates these fields by adding the
-  plan branch (`verifyApproval` + `requirementIds` + `prior` passthrough to `reviewOnce`), with
-  **no change to this signature**.
-- `reviewDocument` resolves priors from the lineage (`selectLineage`) and calls the frozen
+- **Phase 2 supports `stage:"spec"` only.** If `stage === "plan"`, or `priorPath` /
+  `priorApprovalPath` is given, Phase 2 throws a `UsageError` ("plan stage is not supported until
+  Phase 3") — it's rejected on purpose, not quietly ignored. Phase 3 turns these on by adding the
+  plan branch (`verifyApproval` + `requirementIds` + passing `prior` through to `reviewOnce`),
+  with **no change to this signature**.
+- `reviewDocument` finds priors from the lineage (`selectLineage`) and calls the frozen
   `reviewOnce`, passing `priorFindings`/`priorResponses` (and, in Phase 3, `prior`).
 
-## Preconditions
+## Before starting
 
-- **Phase 1 complete** (empirical gate passed; stateless reviewer + full schema + Phase-1
-  semantic checks shipped).
-- Phase-1 interfaces available: `ReviewResult`/`REVIEW_SCHEMA`/`validateStructural`,
-  `validateSemantic`+`SemanticContext`, `runReview`, `computeVerdict`, stateless `reviewOnce`,
-  provider/registry/identity.
+- **Phase 1 is done** (empirical gate passed; stateless reviewer + full schema + Phase-1 semantic
+  checks shipped).
+- Phase-1 pieces are available: `ReviewResult`/`REVIEW_SCHEMA`/`validateStructural`,
+  `validateSemantic` + `SemanticContext`, `runReview`, `computeVerdict`, the stateless
+  `reviewOnce`, and provider/registry/identity.
 
-## Interface handed to Phase 3
+## What Phase 3 inherits from this work
 
 - `RoundArtifact` + `writeRoundOnce`/`readRound`/`listRounds`; `validateRoundArtifact`.
 - `finalizeResponses`/`validateResponses`/`readResponses`/`sidecarPathFor`.
 - `selectLineage` + `LineageSelection`.
-- Persisting `reviewDocument({...}) → {verdict, result, roundPath}` and the approved **spec
-  round artifact** that Phase 3's plan stage consumes as `--prior` approval.
+- The saving `reviewDocument({...}) → {verdict, result, roundPath}` and the approved **spec round
+  record** that Phase 3's plan stage uses as its `--prior` approval.
 
-## Test procedure (automated, no network)
+## Test plan (automated, no network)
 
-- All pulled tasks' tests per the 21-task plan (test-first, mocked providers, no network):
-  envelope validation, parent-hash invariant, write-once collision, finalize-once + no-clobber,
-  sidecar re-bind, parent-pair re-verification, `respond` rejects `--out`/stdin.
+- Every pulled task's tests, per the 21-task plan (test-first, mocked providers, no network):
+  schema validation, the parent-hash invariant, write-once collision, finalize-once + no-clobber,
+  sidecar re-bind, parent-pair re-verification, and `respond` rejecting `--out`/stdin.
 - **Reserved-field guard:** `reviewDocument` with `stage:"plan"` (or a `priorPath`/
   `priorApprovalPath`) throws `UsageError` ("plan stage not supported until Phase 3") — proving
   the reserved fields are rejected, not silently ignored.
 - `npm run build` exits 0.
-- End-to-end (mocked provider): spec review (round 1) → `respond` finalize → re-run with
-  `--prior-log` (round 2 carries prior findings/responses, verifies continuity) → an `approved`
-  round closes the lineage.
+- **End-to-end (mocked provider):** spec review (round 1) → `respond` finalize → re-run with
+  `--prior-log` (round 2 carries the prior findings/answers and checks continuity) → an
+  `approved` round closes the lineage.
 
-## Manual evaluation procedure
+## Manual check by a human
 
-Phase 2 has **no new empirical-quality gate** (review quality was settled in Phase 1). The
-manual check here is **operational**: on 1–2 real specs, drive an actual multi-round loop
-against the Phase-1-validated reviewer and confirm (a) artifacts are immutable and
-hash-consistent, (b) a mutated sidecar/parent is rejected, (c) the lineage reaches `approved`
-exactly when the verdict rule says so.
+Phase 2 has **no new review-quality gate** (quality was settled in Phase 1). This check is about
+**operations**: on 1–2 real specs, run a real multi-round loop against the Phase-1-validated
+reviewer and confirm that (a) the records are immutable and hash-consistent, (b) a tampered
+sidecar/parent is rejected, and (c) the lineage reaches `approved` exactly when the verdict rule
+says it should.
 
-## Completion conditions
+## Done when
 
 - All Phase-2 task tests pass; `tsc` builds clean.
-- An end-to-end spec-stage loop (review → respond → re-run → approved) works on a real spec with
-  durable, re-verifiable artifacts.
+- An end-to-end spec-stage loop (review → respond → re-run → approved) works on a real spec, with
+  durable records that can be re-verified.
 
-## Abort / experiment-failure decision
+## If it goes wrong
 
-- If the persistence/lineage model proves wrong-shaped in practice (e.g. the artifact contract
-  can't represent a needed state), **stop and raise `needs_user_decision`** rather than
-  improvising a schema change — the round artifact is the integrity root.
-- **Rollback:** Phase 1's stateless reviewer remains fully usable; disabling the persisting path
-  reverts to one-shot reviews with no data to migrate. Do not delete or rewrite existing
-  artifacts on rollback (they are immutable by contract).
+- If the saving/lineage model turns out to be the wrong shape in practice (e.g. the record can't
+  represent a state we need), **stop and raise `needs_user_decision`** instead of improvising a
+  schema change — the round record is the integrity root.
+- **Rollback:** Phase 1's stateless reviewer still works fully; turning off the saving path goes
+  back to one-shot reviews with no data to migrate. Do **not** delete or rewrite existing records
+  on rollback (they are immutable by contract).
 
-## Deferred items (explicit)
+## Deferred (spelled out)
 
 Plan-stage review · `[REQ-*]` upstream coverage · approval-artifact verification ·
 `--prior`/`--prior-approval` · Anthropic adapter · `review-loop` skill (→ Phase 3).
