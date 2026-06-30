@@ -7,9 +7,9 @@ describe("selectProvider", () => {
     const p = selectProvider({ provider: "openai", model: "gpt" }, { OPENAI_API_KEY: "k" });
     expect(p.name).toBe("openai");
   });
-  it("throws for an anthropic reviewer (not available in Phase 1)", () => {
-    expect(() => selectProvider({ provider: "anthropic", model: "claude" }, { ANTHROPIC_API_KEY: "k" }))
-      .toThrow(UsageError);
+  it("builds an anthropic provider when its key is present", () => {
+    const p = selectProvider({ provider: "anthropic", model: "claude" }, { ANTHROPIC_API_KEY: "k" });
+    expect(p.name).toBe("anthropic");
   });
   it("throws on a missing key", () => {
     expect(() => selectProvider({ provider: "openai", model: "gpt" }, {})).toThrow(UsageError);
