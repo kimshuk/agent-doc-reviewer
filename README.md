@@ -117,6 +117,30 @@ OPENAI_BASE_URL=https://your-openai-compatible-host/v1   # 선택
   `- [REQ-AUTH] users can sign in`). 이 태그는 스펙 작성 중, 즉 *승인되기 전에* 넣어야 한다.
   승인이 스펙의 콘텐츠 해시에 묶이기 때문이다.
 
+### criteria init — 프로젝트별 기준(criteria) 초안 만들기
+
+스펙에서 criteria **초안**을 생성한 뒤, 사용하기 전에 직접 검토·수정합니다:
+
+```bash
+review-doc criteria init docs/my-spec.md \
+  --generator-provider openai --generator-model gpt-5.4
+# docs/my-spec.md.criteria.md 파일을 생성 (경로 변경은 --out)
+```
+
+초안에는 코드가 소유한 고정 **baseline** 블록, 스펙에서 추출한
+`CRIT-PROJECT-*` 기준, 그리고 후보 `[REQ-*]` 태그를 나열하는 advisory
+**Suggested Requirements** 섹션이 들어갑니다.
+
+주의:
+
+- 생성된 파일은 **초안**입니다. review-doc가 만들었다는 이유만으로 신뢰하지
+  마세요 — `--criteria`로 넘기기 전에 반드시 검토·수정해야 합니다.
+- `criteria init`은 리뷰를 실행하지 않으며, 스펙을 절대 수정하지 않습니다.
+- 스펙에 `[REQ-*]` 태그가 없어도 경고와 함께 정상 종료(exit 0)합니다.
+  제안된 요구사항은 직접 스펙에 옮겨 적으세요.
+- `--criteria`로 사용하기 전에 criteria 파일의 Suggested Requirements
+  섹션은 삭제하세요.
+
 ---
 
 ## 빠른 시작 — 스펙 리뷰

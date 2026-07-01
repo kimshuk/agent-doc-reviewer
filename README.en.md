@@ -116,6 +116,31 @@ A markdown list of criteria the reviewer judges the document against:
   `- [REQ-AUTH] users can sign in`). Write them while authoring the spec — *before* it is approved
   — because the approval is bound to the spec's content hash.
 
+### criteria init — scaffold project-specific criteria
+
+Generate a **draft** criteria file from a spec, then review and edit it before use:
+
+```bash
+review-doc criteria init docs/my-spec.md \
+  --generator-provider openai --generator-model gpt-5.4
+# writes docs/my-spec.md.criteria.md  (use --out to change the path)
+```
+
+The draft contains a fixed, code-owned **baseline** block plus generated
+`CRIT-PROJECT-*` criteria derived from the spec, and an advisory
+**Suggested Requirements** section listing candidate `[REQ-*]` tags.
+
+Important:
+
+- The generated file is a **draft**. It is not trusted merely because
+  review-doc produced it — review and edit it before passing it to
+  `--criteria`.
+- `criteria init` never runs a review and never modifies the spec.
+- If the spec declares no `[REQ-*]` tags, it still succeeds (exit 0) with a
+  warning; copy the suggested requirements into the spec yourself.
+- Delete the Suggested Requirements section from the criteria file before
+  using it with `--criteria`.
+
 ---
 
 ## Quick start — review a spec
