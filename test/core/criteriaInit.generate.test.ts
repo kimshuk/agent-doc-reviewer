@@ -107,4 +107,14 @@ describe("generateCriteriaDraft", () => {
     await expect(generateCriteriaDraft({ specPath: "s.md", specText: "x", provider: p, model: "m" }))
       .rejects.toThrow(ValidationError);
   });
+
+  it("rejects a requirement candidate text containing a newline", async () => {
+    const smuggled = {
+      projectCriteria: [{ id: "CRIT-PROJECT-X", text: "x", optional: false }],
+      reqCandidates: [{ id: "REQ-A", text: "line1\nline2" }]
+    };
+    const p = fakeProvider(async () => smuggled);
+    await expect(generateCriteriaDraft({ specPath: "s.md", specText: "x", provider: p, model: "m" }))
+      .rejects.toThrow(ValidationError);
+  });
 });
