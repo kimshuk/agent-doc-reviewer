@@ -50,4 +50,7 @@ describe("parseRequirements", () => {
   it("extractRequirementIds still throws on a duplicate id", () => {
     expect(() => extractRequirementIds("- [REQ-A] a\n- [REQ-A] a\n")).toThrow(/Duplicate requirement id/);
   });
+  it("extractRequirementIds dedupes instead of throwing when onDuplicate is 'dedupe'", () => {
+    expect(extractRequirementIds("- [REQ-A] a\n- [REQ-A] a\n", { onDuplicate: "dedupe" })).toEqual(["REQ-A"]);
+  });
 });

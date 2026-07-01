@@ -113,6 +113,8 @@ function validateDraft(data: unknown, requireCandidates: boolean): { ok: true; v
     if (!PROJECT_ID.test(c.id))
       return { ok: false, errors: `project criterion id "${c.id}" must match CRIT-PROJECT-* (never a bare baseline id)` };
     if (c.text.trim() === "") return { ok: false, errors: `project criterion "${c.id}" has empty text` };
+    if (/[\r\n]/.test(c.text))
+      return { ok: false, errors: `project criterion "${c.id}" text must be a single line (no newlines)` };
     if (seen.has(c.id)) return { ok: false, errors: `duplicate project criterion id "${c.id}"` };
     seen.add(c.id);
   }
@@ -120,6 +122,8 @@ function validateDraft(data: unknown, requireCandidates: boolean): { ok: true; v
   for (const r of d.reqCandidates) {
     if (!REQ_ID.test(r.id)) return { ok: false, errors: `requirement candidate id "${r.id}" must match REQ-*` };
     if (r.text.trim() === "") return { ok: false, errors: `requirement candidate "${r.id}" has empty text` };
+    if (/[\r\n]/.test(r.text))
+      return { ok: false, errors: `requirement candidate "${r.id}" text must be a single line (no newlines)` };
     if (reqSeen.has(r.id)) return { ok: false, errors: `duplicate requirement candidate id "${r.id}"` };
     reqSeen.add(r.id);
   }
@@ -152,7 +156,10 @@ export async function generateCriteriaDraft(args: {
   specPath: string; specText: string;
   provider: StructuredProvider; model: string;
 }): Promise<{ markdown: string; criteriaCount: number; reqPresent: string[]; reqCandidates: ReqCandidate[] }> {
-  const reqPresent = extractRequirementIds(args.specText);   // [] when the spec has none (P2.3)
+  // { onDuplicate: "dedupe" }: `criteria init` is a lenient scaffold — a spec with an accidental
+  // duplicate [REQ-*] should still produce a draft rather than hard-failing (parseRequirements,
+  // used on the strict --prior path, keeps the default throw-on-duplicate behavior unchanged).
+  const reqPresent = extractRequirementIds(args.specText, { onDuplicate: "dedupe" }); // [] when the spec has none (P2.3)
   const requireCandidates = reqPresent.length === 0;         // then we demand at least one suggestion (P1.2)
   const system = buildGenSystemPrompt();
   const user = buildGenUserPrompt(args.specPath, args.specText);

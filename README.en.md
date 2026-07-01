@@ -140,6 +140,8 @@ Important:
   warning; copy the suggested requirements into the spec yourself.
 - Delete the Suggested Requirements section from the criteria file before
   using it with `--criteria`.
+- `--reviewer-base-url <url>` overrides the base URL for an OpenAI-compatible endpoint (ignored for
+  anthropic); `--dotenv <path>` points at an env file holding credentials (defaults to `.env`).
 
 ---
 

@@ -89,4 +89,22 @@ describe("generateCriteriaDraft", () => {
     await expect(generateCriteriaDraft({ specPath: "s.md", specText: "x", provider: fakeProvider(async () => badReq), model: "m" }))
       .rejects.toThrow(ValidationError);
   });
+
+  it("tolerates a duplicated [REQ-*] in the spec (dedupes rather than throwing)", async () => {
+    const p = fakeProvider(async () => goodDraft);
+    const out = await generateCriteriaDraft({
+      specPath: "s.md", specText: "# Spec\n- [REQ-X] a\n- [REQ-X] a\n", provider: p, model: "m"
+    });
+    expect(out.reqPresent).toEqual(["REQ-X"]);
+  });
+
+  it("rejects a project criterion text containing a newline (smuggled bullet), even after repair", async () => {
+    const smuggled = {
+      projectCriteria: [{ id: "CRIT-PROJECT-Z", text: "evil\n- [CRIT-PROJECT-Z] smuggled", optional: false }],
+      reqCandidates: [{ id: "REQ-A", text: "a" }]
+    };
+    const p = fakeProvider(async () => smuggled);
+    await expect(generateCriteriaDraft({ specPath: "s.md", specText: "x", provider: p, model: "m" }))
+      .rejects.toThrow(ValidationError);
+  });
 });

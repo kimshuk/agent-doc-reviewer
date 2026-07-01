@@ -140,6 +140,8 @@ review-doc criteria init docs/my-spec.md \
   제안된 요구사항은 직접 스펙에 옮겨 적으세요.
 - `--criteria`로 사용하기 전에 criteria 파일의 Suggested Requirements
   섹션은 삭제하세요.
+- `--reviewer-base-url <url>` 는 OpenAI 호환 엔드포인트의 base URL을 덮어씁니다(anthropic 에는 무시됨).
+  `--dotenv <path>` 는 자격증명이 담긴 env 파일을 지정합니다(기본 `.env`).
 
 ---
 
