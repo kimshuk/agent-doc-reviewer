@@ -728,7 +728,7 @@ git commit -m "feat: generateCriteriaDraft with id validation + repair-once"
 - Test: `test/cli/cli.test.ts` (new `describe("cli criteria init", ...)`)
 
 **Interfaces:**
-- Consumes: `generateCriteriaDraft` (Task 3), `selectProvider`/`makeProvider` dep, `existsSync`, `readFile`, `writeFile`, `UsageError`.
+- Consumes: `generateCriteriaDraft` (Task 3), `selectProvider`/`makeProvider` dep, `existsSync`, `readFile`, `writeFile`, `mkdir`, `dirname`, `UsageError`.
 - Produces: CLI behavior — writes `<out>`, prints `{ written, criteriaCount, reqPresent, reqCandidateCount }`, exit 0; warns + exit 0 on no REQ; exit 2 on overwrite/usage errors.
 
 - [ ] **Step 1: Write the failing tests**
@@ -770,6 +770,18 @@ describe("cli criteria init", () => {
     expect(written).toContain("- [CRIT-PROJECT-X] x");
     expect(p.review).not.toHaveBeenCalled();          // acceptance: criteria init never calls review()
     expect(p.generateStructured).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates parent directories for --out (P2.1)", async () => {
+    const o = io();
+    const spec = join(dir, "s.md"); await writeFile(spec, "# Spec\n- [REQ-X] x\n");
+    const out = join(dir, "nested", "criteria", "s.criteria.md");
+    const code = await main(
+      ["criteria", "init", spec, "--generator-provider", "openai", "--generator-model", "gpt", "--out", out],
+      { OPENAI_API_KEY: "k" }, o, critDeps(genProvider(okDraft))
+    );
+    expect(code).toBe(0);
+    expect(await readFile(out, "utf8")).toContain("- [CRIT-PROJECT-X] x");
   });
 
   it("warns and still exits 0 when the spec has no [REQ-*]", async () => {
@@ -829,7 +841,7 @@ describe("cli criteria init", () => {
 Run: `npx vitest run test/cli/cli.test.ts`
 Expected: FAIL — the `criteria` argv currently reaches `parseArgs` and throws `Unexpected argument: init`, so `written`/exit expectations fail.
 
-- [ ] **Step 3: Add the `writeFile` import**
+- [ ] **Step 3: Add the filesystem imports**
 
 In `src/cli/index.ts`, change:
 
@@ -840,7 +852,13 @@ import { readFile } from "node:fs/promises";
 to:
 
 ```ts
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+```
+
+and add a `node:path` import near the other node imports (there is no existing `node:path` import in this file):
+
+```ts
+import { dirname } from "node:path";
 ```
 
 - [ ] **Step 4: Add the `criteria` branch in `main`**
@@ -908,6 +926,7 @@ async function runCriteriaInit(
   const { markdown, criteriaCount, reqPresent, reqCandidates } = await generateCriteriaDraft({
     specPath: spec, specText, provider, model: genModel
   });
+  await mkdir(dirname(outPath), { recursive: true });   // criteria often collected under a dedicated dir
   await writeFile(outPath, markdown, { flag: "wx" });   // wx: fail if the file appeared meanwhile
 
   if (reqPresent.length === 0)
@@ -1022,7 +1041,7 @@ git commit -m "docs: document review-doc criteria init"
 ## Self-Review
 
 **Spec coverage:**
-- CLI surface / flag naming (`--generator-*`, `--out`, refuse-overwrite) → Task 4.
+- CLI surface / flag naming (`--generator-*`, `--out`, refuse-overwrite, `--out` parent-dir creation P2.1) → Task 4.
 - Generic `generateStructured`, `review()` frozen → Task 1.
 - Baseline constant + deterministic assembly + generator metadata header → Task 2.
 - `generateCriteriaDraft`, `CRIT-PROJECT-*` namespace + repair-once, `parseCriteria` final validation → Task 3.
