@@ -191,7 +191,8 @@ export async function reviewDocument(
 export * from "./types.js";
 export { selectProvider } from "./providers/registry.js";
 export { assertCrossModel } from "./identity.js";
-export { parseCriteria, parseRequirements } from "./criteria.js";
+export { parseCriteria, parseRequirements, extractRequirementIds } from "./criteria.js";
+export { generateCriteriaDraft, assembleCriteriaMarkdown } from "./criteriaInit.js";
 export { runCompare } from "./compare.js";
 export { finalizeResponses, validateResponses, readResponses, sidecarPathFor } from "./responses.js";
 export { UsageError, ValidationError } from "./errors.js";

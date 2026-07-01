@@ -25,7 +25,7 @@ export function parseCriteria(markdown: string): ParsedCriteria {
   return { ids, meta };
 }
 
-export function parseRequirements(markdown: string): string[] {
+export function extractRequirementIds(markdown: string): string[] {
   const ids: string[] = [];
   const seen = new Set<string>();
   let inFence = false;
@@ -38,6 +38,11 @@ export function parseRequirements(markdown: string): string[] {
     if (seen.has(id)) throw new UsageError(`Duplicate requirement id: ${id}`);
     seen.add(id); ids.push(id);
   }
+  return ids;
+}
+
+export function parseRequirements(markdown: string): string[] {
+  const ids = extractRequirementIds(markdown);
   if (ids.length === 0) throw new UsageError("No [REQ-*] requirements declared in --prior");
   return ids;
 }
