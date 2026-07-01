@@ -41,4 +41,19 @@ describe("anthropic adapter", () => {
     const p = createAnthropicProvider({ apiKey: "k" });
     await expect(p.review(req)).rejects.toThrow(/429/);
   });
+  it("generateStructured uses a caller-supplied schemaName and returns tool input", async () => {
+    const body = { content: [{ type: "tool_use", name: "criteria_draft", input: { projectCriteria: [] } }] };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body, text: async () => "" });
+    vi.stubGlobal("fetch", fetchMock);
+    const p = createAnthropicProvider({ apiKey: "k" });
+    const out = await p.generateStructured({
+      system: "S", user: "U", schema: { type: "object" }, schemaName: "criteria_draft",
+      model: "claude-x", temperature: 0
+    });
+    expect(out).toEqual({ projectCriteria: [] });
+    const sent = JSON.parse((fetchMock.mock.calls[0][1] as any).body);
+    expect(sent.tools[0].name).toBe("criteria_draft");
+    expect(sent.tool_choice).toEqual({ type: "tool", name: "criteria_draft" });
+    expect(JSON.stringify(sent)).not.toContain("emit_review");
+  });
 });

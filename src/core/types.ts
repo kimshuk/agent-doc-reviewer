@@ -50,4 +50,20 @@ export interface ReviewRequest {
   priorInvalidOutput?: string;
   validationErrors?: string;
 }
-export interface ReviewerProvider { name: string; review(req: ReviewRequest): Promise<unknown>; }
+export interface StructuredRequest {
+  system: string;
+  user: string;
+  schema: object;
+  schemaName: string;              // caller-supplied tool/schema name; keeps review persona out of generic calls
+  model: string;
+  temperature: number;
+  priorInvalidOutput?: string;
+  validationErrors?: string;
+}
+export interface StructuredProvider {
+  name: string;
+  generateStructured(req: StructuredRequest): Promise<unknown>;
+}
+export interface ReviewerProvider extends StructuredProvider {
+  review(req: ReviewRequest): Promise<unknown>;
+}

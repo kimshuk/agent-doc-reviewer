@@ -48,4 +48,18 @@ describe("openai adapter", () => {
     const p = createOpenAIProvider({ apiKey: "k" });
     await expect(p.review(req)).rejects.toThrow(/500/);
   });
+  it("generateStructured names the json_schema from schemaName", async () => {
+    const body = { choices: [{ message: { content: JSON.stringify({ projectCriteria: [] }) } }] };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body, text: async () => "" });
+    vi.stubGlobal("fetch", fetchMock);
+    const p = createOpenAIProvider({ apiKey: "k" });
+    const out = await p.generateStructured({
+      system: "S", user: "U", schema: { type: "object" }, schemaName: "criteria_draft",
+      model: "gpt-x", temperature: 0
+    });
+    expect(out).toEqual({ projectCriteria: [] });
+    const sent = JSON.parse((fetchMock.mock.calls[0][1] as any).body);
+    expect(sent.response_format.json_schema.name).toBe("criteria_draft");
+    expect(JSON.stringify(sent)).not.toContain("review_result");
+  });
 });
