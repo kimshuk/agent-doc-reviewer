@@ -158,10 +158,20 @@ Assembled in code so the baseline can never be rewritten by the model.
 ## Project-specific (generated — verify before use)
 - [CRIT-PROJECT-...] ...
 
-## Suggested Requirements (advisory — copy into the SPEC, not here)
+## Suggested Requirements (advisory — remove or copy into the SPEC before using this file)
+# These are NOT review criteria. Before using this file with --criteria, either:
+#   1. copy the chosen [REQ-*] items into the spec and delete this section, or
+#   2. delete this section if the spec already declares complete [REQ-*] tags.
 # spec already declares: REQ-X, REQ-Y      (or: none found)
 - [REQ-...] ...
 ```
+
+The stronger "remove or copy … before using this file" wording is deliberate:
+the whole file is one criteria document, so an LLM reviewer handed it via
+`--criteria` sees the Suggested Requirements text in the same file as the real
+criteria. Marking the section "advisory" in prose is not enough — the heading
+itself must instruct removal. (A future version may emit suggested requirements
+to a separate file; v1 keeps them in-file but with this explicit guard.)
 
 - The baseline block is a **constant** in code, emitted verbatim. Baseline
   wording for the five original ids is carried verbatim from
@@ -175,6 +185,11 @@ Assembled in code so the baseline can never be rewritten by the model.
   guarantees the draft is actually parseable/usable as a `--criteria` input and
   catches any duplicate id. A parse failure is an internal error → exit 2 (the
   command must never write an unparseable draft).
+- `parseCriteria` only extracts anchored `[CRIT-*]` list items. Advisory
+  `[REQ-*]` items in the Suggested Requirements section must not be treated as
+  criteria — the parser ignores non-`CRIT` lines, so the `[REQ-*]` suggestions
+  and the `#`-prefixed guidance lines are silently skipped, never parsed as
+  criteria and never a parse error.
 
 ## REQ handling
 
