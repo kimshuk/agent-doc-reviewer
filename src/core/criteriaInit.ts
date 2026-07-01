@@ -1,8 +1,10 @@
 import { parseCriteria } from "./criteria.js";
 
 // Baseline criteria are CODE-OWNED and emitted verbatim so an LLM can never weaken the review
-// contract. The first five lines are carried verbatim from examples/criteria.spec.md; the last two
-// (IMPLEMENTABILITY, REQ-TAGS) are new baseline criteria owned by this feature.
+// contract. SCOPE/FEASIBILITY/CORRECTNESS/FAILURE-HANDLING are adapted from examples/criteria.spec.md
+// (SCOPE intentionally generalized — the "v1" qualifier dropped — since this baseline is project-
+// agnostic); IMPLEMENTABILITY and REQ-TAGS are new baseline criteria owned by this feature; STYLE is
+// kept OPTIONAL and ordered last on purpose.
 export const BASELINE: string[] = [
   "- [CRIT-SCOPE] The design stays within the stated scope and defers non-blockers explicitly.",
   "- [CRIT-FEASIBILITY] Every claimed guarantee is achievable by the described mechanism.",
