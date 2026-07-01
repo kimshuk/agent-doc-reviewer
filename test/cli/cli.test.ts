@@ -394,3 +394,102 @@ describe("cli respond", () => {
     expect(existsSync(roundPath.replace(/\.json$/, ".responses.json"))).toBe(false);
   });
 });
+
+import { generateCriteriaDraft } from "../../src/core/index.js";
+import type { StructuredProvider } from "../../src/core/types.js";
+
+// A fake provider carrying BOTH capabilities; criteria init only touches generateStructured.
+const genProvider = (draft: unknown): StructuredProvider & { review: any } => ({
+  name: "openai",
+  generateStructured: vi.fn().mockResolvedValue(draft),
+  review: vi.fn()
+});
+const okDraft = {
+  projectCriteria: [{ id: "CRIT-PROJECT-X", text: "x", optional: false }],
+  reqCandidates: [{ id: "REQ-C", text: "c" }]
+};
+const critDeps = (p: any) => ({ makeProvider: () => p });
+
+describe("cli criteria init", () => {
+  it("writes a draft file, prints a summary, and never calls review() (exit 0)", async () => {
+    const o = io();
+    const p = genProvider(okDraft);
+    const spec = join(dir, "s.md"); await writeFile(spec, "# Spec\n- [REQ-X] log in\n");
+    const code = await main(
+      ["criteria", "init", spec, "--generator-provider", "openai", "--generator-model", "gpt"],
+      { OPENAI_API_KEY: "k" }, o, critDeps(p)
+    );
+    expect(code).toBe(0);
+    const printed = JSON.parse(o.out.join(""));
+    expect(printed.written).toBe(`${spec}.criteria.md`);
+    expect(printed.criteriaCount).toBe(8);
+    expect(printed.reqPresent).toEqual(["REQ-X"]);
+    expect(printed.reqCandidateCount).toBe(1);
+    const written = await readFile(`${spec}.criteria.md`, "utf8");
+    expect(written).toContain("- [CRIT-PROJECT-X] x");
+    expect(p.review).not.toHaveBeenCalled();          // acceptance: criteria init never calls review()
+    expect(p.generateStructured).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates parent directories for --out (P2.1)", async () => {
+    const o = io();
+    const spec = join(dir, "s.md"); await writeFile(spec, "# Spec\n- [REQ-X] x\n");
+    const out = join(dir, "nested", "criteria", "s.criteria.md");
+    const code = await main(
+      ["criteria", "init", spec, "--generator-provider", "openai", "--generator-model", "gpt", "--out", out],
+      { OPENAI_API_KEY: "k" }, o, critDeps(genProvider(okDraft))
+    );
+    expect(code).toBe(0);
+    expect(await readFile(out, "utf8")).toContain("- [CRIT-PROJECT-X] x");
+  });
+
+  it("warns and still exits 0 when the spec has no [REQ-*]", async () => {
+    const o = io();
+    const spec = join(dir, "n.md"); await writeFile(spec, "# Spec\nno tags\n");
+    const code = await main(
+      ["criteria", "init", spec, "--generator-provider", "openai", "--generator-model", "gpt"],
+      { OPENAI_API_KEY: "k" }, o, critDeps(genProvider(okDraft))
+    );
+    expect(code).toBe(0);
+    expect(o.err.join("")).toMatch(/no \[REQ-\*\] tags/);
+  });
+
+  it("refuses to overwrite an existing --out (exit 2, file untouched)", async () => {
+    const o = io();
+    const spec = join(dir, "s.md"); await writeFile(spec, "# Spec\n");
+    const out = join(dir, "s.md.criteria.md"); await writeFile(out, "ORIGINAL");
+    const code = await main(
+      ["criteria", "init", spec, "--generator-provider", "openai", "--generator-model", "gpt"],
+      { OPENAI_API_KEY: "k" }, o, critDeps(genProvider(okDraft))
+    );
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/refusing to overwrite/);
+    expect(await readFile(out, "utf8")).toBe("ORIGINAL");
+  });
+
+  it("never mutates the source spec", async () => {
+    const o = io();
+    const spec = join(dir, "s.md"); const original = "# Spec\n- [REQ-X] log in\n";
+    await writeFile(spec, original);
+    await main(
+      ["criteria", "init", spec, "--generator-provider", "openai", "--generator-model", "gpt"],
+      { OPENAI_API_KEY: "k" }, o, critDeps(genProvider(okDraft))
+    );
+    expect(await readFile(spec, "utf8")).toBe(original);
+  });
+
+  it("errors on a missing generator provider/model (exit 2)", async () => {
+    const o = io();
+    const spec = join(dir, "s.md"); await writeFile(spec, "# Spec\n");
+    const code = await main(["criteria", "init", spec], { OPENAI_API_KEY: "k" }, o, critDeps(genProvider(okDraft)));
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/--generator-provider and --generator-model are required/);
+  });
+
+  it("errors on an unknown criteria subcommand (exit 2)", async () => {
+    const o = io();
+    const code = await main(["criteria", "bogus"], { OPENAI_API_KEY: "k" }, o, critDeps(genProvider(okDraft)));
+    expect(code).toBe(2);
+    expect(o.err.join("")).toMatch(/unknown criteria subcommand/);
+  });
+});

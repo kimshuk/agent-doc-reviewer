@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 import type { ProviderSpec, Stage, AuthorResponse } from "../core/types.js";
-import { reviewDocument, buildReviewInputs, parseRequirements } from "../core/index.js";
+import { reviewDocument, buildReviewInputs, parseRequirements, generateCriteriaDraft } from "../core/index.js";
 import { runCompare } from "../core/compare.js";
 import { finalizeResponses } from "../core/responses.js";
 import { verifyApproval } from "../core/approval.js";
 import { selectProvider } from "../core/providers/registry.js";
 import { assertCrossModel } from "../core/identity.js";
 import { UsageError } from "../core/errors.js";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
 import { loadEnv } from "./env.js";
 
 export interface CliIO { stdout: (s: string) => void; stderr: (s: string) => void }
@@ -65,6 +66,57 @@ function parseTargets(spec: string): ProviderSpec[] {
   });
 }
 
+async function runCriteriaInit(
+  argv: string[], env: Record<string, string | undefined>, io: CliIO, makeProvider: typeof selectProvider
+): Promise<number> {
+  if (argv[0] !== "init")
+    throw new UsageError(`unknown criteria subcommand: ${argv[0] ?? "(none)"} (only 'init' is supported)`);
+
+  const CRIT_VALUE_FLAGS = ["--generator-provider", "--generator-model", "--out", "--reviewer-base-url", "--dotenv"];
+  const flags: Record<string, string> = {};
+  let spec: string | undefined;
+  const rest = argv.slice(1);
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (CRIT_VALUE_FLAGS.includes(a)) {
+      const v = rest[++i];
+      if (v === undefined) throw new UsageError(`${a} requires a value`);
+      flags[a] = v;
+    } else if (a.startsWith("--")) {
+      throw new UsageError(`Unknown option: ${a}`);
+    } else if (spec === undefined) {
+      spec = a;
+    } else {
+      throw new UsageError(`Unexpected argument: ${a}`);
+    }
+  }
+  if (!spec) throw new UsageError("criteria init requires a <spec> path");
+  const genProvider = flags["--generator-provider"];
+  const genModel = flags["--generator-model"];
+  if (!genProvider || !genModel)
+    throw new UsageError("--generator-provider and --generator-model are required");
+
+  const outPath = flags["--out"] ?? `${spec}.criteria.md`;
+  // Pre-check for a clean message; the wx write flag below closes the TOCTOU window.
+  if (existsSync(outPath)) throw new UsageError(`refusing to overwrite existing file: ${outPath}`);
+
+  const specText = await readFile(spec, "utf8");
+  const baseURL = flags["--reviewer-base-url"];
+  const env2 = baseURL ? { ...env, OPENAI_BASE_URL: baseURL } : env;
+  const provider = makeProvider({ provider: genProvider, model: genModel }, env2);
+
+  const { markdown, criteriaCount, reqPresent, reqCandidates } = await generateCriteriaDraft({
+    specPath: spec, specText, provider, model: genModel
+  });
+  await mkdir(dirname(outPath), { recursive: true });   // criteria often collected under a dedicated dir
+  await writeFile(outPath, markdown, { flag: "wx" });   // wx: fail if the file appeared meanwhile
+
+  if (reqPresent.length === 0)
+    io.stderr(`warning: '${spec}' declares no [REQ-*] tags; ${reqCandidates.length} suggested requirement(s) written to '${outPath}' — copy them into the spec before review`);
+  io.stdout(JSON.stringify({ written: outPath, criteriaCount, reqPresent, reqCandidateCount: reqCandidates.length }));
+  return 0;
+}
+
 export async function main(
   argv: string[], env: Record<string, string | undefined>, io: CliIO, deps: CliDeps = {}
 ): Promise<number> {
@@ -72,6 +124,12 @@ export async function main(
   const mintLineageId = deps.mintLineageId ?? (() => `${now().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`);
   const makeProvider = deps.makeProvider ?? selectProvider;
   try {
+    // `criteria init` takes two positionals (`criteria` `init` <spec>), which the generic parseArgs
+    // would reject — so branch on it before parseArgs runs.
+    if (argv[0] === "criteria") {
+      return await runCriteriaInit(argv.slice(1), env, io, makeProvider);
+    }
+
     const { doc, flags, bools } = parseArgs(argv);
 
     // `respond` finalizes the author-response sidecar beside an existing round artifact.
