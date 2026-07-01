@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCriteria, parseRequirements } from "../../src/core/criteria.js";
+import { parseCriteria, parseRequirements, extractRequirementIds } from "../../src/core/criteria.js";
 import { UsageError } from "../../src/core/errors.js";
 
 describe("parseCriteria", () => {
@@ -40,5 +40,17 @@ describe("parseRequirements", () => {
   });
   it("ignores REQ tags in prose, extracts only anchored list items", () => {
     expect(parseRequirements("REQ-NOPE mentioned in prose\n- [REQ-OK] real")).toEqual(["REQ-OK"]);
+  });
+  it("extractRequirementIds returns [] when a document declares no [REQ-*]", () => {
+    expect(extractRequirementIds("# Spec\nno tags here\n")).toEqual([]);
+  });
+  it("extractRequirementIds collects declared ids in order", () => {
+    expect(extractRequirementIds("- [REQ-A] a\n- [REQ-B] b\n")).toEqual(["REQ-A", "REQ-B"]);
+  });
+  it("extractRequirementIds still throws on a duplicate id", () => {
+    expect(() => extractRequirementIds("- [REQ-A] a\n- [REQ-A] a\n")).toThrow(/Duplicate requirement id/);
+  });
+  it("extractRequirementIds dedupes instead of throwing when onDuplicate is 'dedupe'", () => {
+    expect(extractRequirementIds("- [REQ-A] a\n- [REQ-A] a\n", { onDuplicate: "dedupe" })).toEqual(["REQ-A"]);
   });
 });

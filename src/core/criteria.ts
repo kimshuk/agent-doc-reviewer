@@ -25,7 +25,11 @@ export function parseCriteria(markdown: string): ParsedCriteria {
   return { ids, meta };
 }
 
-export function parseRequirements(markdown: string): string[] {
+export function extractRequirementIds(
+  markdown: string,
+  opts: { onDuplicate?: "throw" | "dedupe" } = {}
+): string[] {
+  const onDuplicate = opts.onDuplicate ?? "throw";
   const ids: string[] = [];
   const seen = new Set<string>();
   let inFence = false;
@@ -35,9 +39,17 @@ export function parseRequirements(markdown: string): string[] {
     const m = line.match(REQ);
     if (!m) continue;
     const id = m[1];
-    if (seen.has(id)) throw new UsageError(`Duplicate requirement id: ${id}`);
+    if (seen.has(id)) {
+      if (onDuplicate === "throw") throw new UsageError(`Duplicate requirement id: ${id}`);
+      continue;                       // dedupe: keep first occurrence, skip repeats
+    }
     seen.add(id); ids.push(id);
   }
+  return ids;
+}
+
+export function parseRequirements(markdown: string): string[] {
+  const ids = extractRequirementIds(markdown);
   if (ids.length === 0) throw new UsageError("No [REQ-*] requirements declared in --prior");
   return ids;
 }
